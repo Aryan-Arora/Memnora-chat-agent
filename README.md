@@ -4,6 +4,8 @@ Memnora is a web-aware chat agent that remembers useful context across conversat
 
 > **Search live. Remember what matters.**
 
+> **Current scope:** Memnora is a local-first, **single-user application**. Run one private instance per user; a shared deployment does not yet isolate conversations or memory between accounts.
+
 The project deliberately gives the agent **one tool: web search**. Memory is not another tool the model chooses to call; it is a small, deterministic context layer that runs around the agent loop. This keeps the architecture fast, testable, and easy to explain.
 
 ## What makes the memory layer different
@@ -124,3 +126,17 @@ npm run bench
 ## Design principle
 
 Memnora does not try to remember everything. It remembers the smallest useful, attributable representation; retrieves only what is relevant; re-checks facts that can change; and gives the user a direct way to inspect, correct, or forget what was retained.
+
+## Scope: multi-user application
+
+Memnora intentionally uses one local SQLite database, one memory namespace, and no authentication today. That is appropriate for local evaluation and the current placement challenge, but the current version should not be deployed as a shared public service.
+
+A future multi-user release will add:
+
+- authenticated accounts and secure server-side sessions;
+- explicit `user_id` ownership for conversations, messages, notes, re-checks, ingestion jobs, memory candidates, tombstones, and personalization profiles;
+- mandatory user scoping across conversation lists, FTS recall, candidate resolution, updates, deletion, and explicit forgetting;
+- migration of existing local data to a designated owner; and
+- isolation tests proving that one user cannot read, recall, modify, or delete another user's data.
+
+The first multi-user version can continue using deployment-owned model and search credentials from `.env`. Encrypted per-user provider credentials would be a separate hosted-product decision.
