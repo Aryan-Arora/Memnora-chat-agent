@@ -85,7 +85,8 @@ function ftsQuery(input: string): string {
     "a", "an", "and", "about", "asked", "before", "can", "changed", "could", "did", "do", "for", "from", "has", "have", "how", "i", "in", "is", "it",
     "last", "me", "my", "now", "on", "please", "re", "remember", "said", "should", "since", "still", "tell", "the", "this", "time", "to", "today", "was",
     "we", "what", "when", "which", "you", "your", "yesterday", "january", "february", "march", "april", "may", "june", "july",
-    "august", "september", "october", "november", "december", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "would",
+    "august", "september", "october", "november", "december", "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "would",
   ]);
   return (input.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? [])
     .filter((word) => !stop.has(word) && !/^\d{1,4}$/.test(word))
@@ -261,7 +262,16 @@ export function createSqliteMemory(file = path.resolve("data/memory.sqlite")): N
         ? (dateRange ? [match, dateRange.from, dateRange.to, count] : [match, count])
         : (dateRange ? [dateRange.from, dateRange.to, count] : [count]);
       const rows = db.prepare(sql).all(...params) as unknown as NoteRow[];
-      if (rows.length || !categoryCue(query)) return rows.map(note);
+      if (rows.length) return rows.map(note);
+      // For an explicit bounded date, the date is stronger evidence than incidental words
+      // such as “correct”. Return only that day's newest notes when FTS has no overlap.
+      if (dateRange) {
+        const dated = db.prepare(`SELECT n.* FROM notes n
+          WHERE n.created_at >= ? AND n.created_at < ? ORDER BY n.created_at DESC LIMIT ?`)
+          .all(dateRange.from, dateRange.to, count) as unknown as NoteRow[];
+        if (dated.length) return dated.map(note);
+      }
+      if (!categoryCue(query)) return [];
       // A structured cue can recover a preference/decision even when wording has no overlap.
       const category = categoryCue(query);
       const categoryDate = dateRange ? `AND n.created_at >= ? AND n.created_at < ?` : "";

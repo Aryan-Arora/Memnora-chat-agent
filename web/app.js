@@ -265,7 +265,13 @@ async function send(message) {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ conversationId, message, profile: loadProfile() }),
+      body: JSON.stringify({
+        conversationId,
+        message,
+        profile: loadProfile(),
+        // Calendar phrases must follow the user's day, not the server's UTC day.
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      }),
     });
     if (!res.ok || !res.body) throw new Error(`Server returned ${res.status}`);
 

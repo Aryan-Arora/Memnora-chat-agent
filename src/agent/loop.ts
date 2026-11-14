@@ -45,6 +45,12 @@ export interface AgentDeps {
   onTiming?: (timing: AgentTiming) => void;
 }
 
+export interface AgentOptions {
+  profile?: UserProfile;
+  /** IANA zone from the browser, for example "Asia/Kolkata". */
+  timeZone?: string;
+}
+
 export interface AgentTiming {
   memoryMs: number;
   routerMs: number;
@@ -118,12 +124,19 @@ function noteStore(memory: MemoryStore): NoteMemoryStore | null {
     : null;
 }
 
-const PAST_CUE = /\b(remember|earlier|previous|before|last time|we discussed|we decided|i asked|you said|re-?check|changed since|still)\b/i;
+// “before” and “still” alone describe ordinary factual questions too; treating them as
+// memory cues caused questions about Apple and Python to skip web verification.
+const PAST_CUE = /\b(remember|earlier|previous|last time|we discussed|we decided|i asked|you said|re-?check|changed since)\b/i;
 const CROSS_CHAT_CUE = /\b(summar(?:y|ize)|recap|other chat|previous chat|last chat|past chat|earlier chat|another chat|conversation)\b/i;
 const RECHECK_CUE = /\b(re-?check|changed|change since|still|now|current|latest|today)\b/i;
 const FRESH_CUE = /\b(latest|current|today|news|price|pricing|version|release|available|availability)\b/i;
 const AMBIGUOUS_REFERENCE = /\b(it|they|them|that|those|one|ones|second|first|best)\b/i;
+const UNRESOLVED_REFERENCE = /\b(it|they|them|that|those|one|ones)\b/i;
 const STABLE_CUE = /\b(capital of|chemical symbol for|square root of|who wrote|author of)\b/i;
+// Assumed product features are a common hallucination trap. Verify their existence instead
+// of trusting a router that may mistake a procedural-looking question for timeless advice.
+const TECH_VERIFICATION_CUE = /\b(enable|configure|install|setup|feature|mode|api|sdk|plugin|integration|version|postgres|database|framework|library)\b/i;
+const FACTUAL_QUESTION_CUE = /^\s*(who|what|when|where|which|is|are|was|were|does|did|has|have|can)\b/i;
 const pendingMemory = new Map<string, Promise<void>>();
 
 /** Tests and graceful shutdown use this; normal requests only await their own conversation. */
@@ -185,7 +198,7 @@ export async function runAgent(
   conversationId: string,
   userText: string,
   emit: (e: AgentEvent) => void,
-  opts: { profile?: UserProfile } = {},
+  opts: AgentOptions = {},
 ): Promise<void> {
   const started = performance.now();
   let memoryDone = started, routeStarted = started, routeDone = started;
@@ -198,7 +211,7 @@ export async function runAgent(
     const compact = noteStore(deps.memory);
     // Cross-chat recall must also see extraction that just finished in another chat.
     await waitForMemoryTasks(crossChatRecall ? undefined : conversationId);
-    if (compact && (crossChatRecall || PAST_CUE.test(userText) || resolveDate(userText, now))) {
+    if (compact && (crossChatRecall || PAST_CUE.test(userText) || resolveDate(userText, now, opts.timeZone))) {
       await drainIngestionJobs(deps, compact); // recover jobs left by an earlier process
     }
     const userMsg: Message = {
@@ -207,7 +220,7 @@ export async function runAgent(
     emit({ type: "status", text: "Thinking" });
 
     // Memory lookup happens BEFORE saving this message, so "today" doesn't echo it back.
-    const range = resolveDate(userText, now);
+    const range = resolveDate(userText, now, opts.timeZone);
     const shouldRecall = Boolean(range || PAST_CUE.test(userText) || crossChatRecall);
     // Note retrieval and recent-chat loading are independent and run together.
     const [retrievedNotes, recent] = await Promise.all([
@@ -254,16 +267,20 @@ export async function runAgent(
       .map((m) => `${m.role}: ${m.content.slice(0, 300)}`)
       .join("\n");
     const routerInput = `${transcript ? `Recent conversation:\n${transcript}\n\n` : ""}Latest user message:\n${userText}\n\nReply now with exactly NO or SEARCH: <query>.`;
-    const volatileNote = retrievedNotes.find((note) => note.volatility === "volatile" && note.query);
-    const previousSnapshot = compact && volatileNote && RECHECK_CUE.test(userText)
-      ? await compact.latestRecheck(volatileNote.id)
+    const recheckNote = RECHECK_CUE.test(userText)
+      ? retrievedNotes.find((note) => note.volatility === "volatile" && note.query)
+        ?? retrievedNotes.find((note) => note.query)
+      : undefined;
+    const previousSnapshot = compact && recheckNote
+      ? await compact.latestRecheck(recheckNote.id)
       : null;
     let query: string;
     let routeSource: string;
     routeStarted = performance.now();
-    if (previousSnapshot && volatileNote?.query) {
-      // Re-checks already have the exact query that produced the old snapshot.
-      query = volatileNote.query;
+    if (recheckNote?.query) {
+      // Recall first, then reuse the query that produced the old answer. A structured
+      // snapshot improves the comparison but is not required to perform the re-check.
+      query = recheckNote.query;
       routeSource = "stored query";
     } else if (shouldRecall && !FRESH_CUE.test(userText)) {
       query = "";
@@ -274,6 +291,12 @@ export async function runAgent(
     } else if (STABLE_CUE.test(userText)) {
       query = "";
       routeSource = "stable-fact rule";
+    } else if (TECH_VERIFICATION_CUE.test(userText)) {
+      query = userText.slice(0, 200);
+      routeSource = "technical verification rule";
+    } else if (!shouldRecall && FACTUAL_QUESTION_CUE.test(userText) && !UNRESOLVED_REFERENCE.test(userText)) {
+      query = userText.slice(0, 200);
+      routeSource = "factual verification rule";
     } else if (/^\s*(hi|hello|hey|thanks|thank you|good (morning|afternoon|evening))\b/i.test(userText)) {
       query = "";
       routeSource = "chitchat rule";
@@ -316,11 +339,11 @@ export async function runAgent(
       searchDone = performance.now();
     }
 
-    if (compact && volatileNote && previousSnapshot && results.length) {
+    if (compact && recheckNote && previousSnapshot && results.length) {
       snapshotStarted = performance.now();
       const rawSnapshot = await deps.fast.complete({
         system: SNAPSHOT_EXTRACTION_SYSTEM,
-        messages: [{ role: "user", content: buildSnapshotExtractionPrompt(volatileNote.claim, previousSnapshot.snapshot, results) }],
+        messages: [{ role: "user", content: buildSnapshotExtractionPrompt(recheckNote.claim, previousSnapshot.snapshot, results) }],
         // Reasoning models may spend much of this budget invisibly before emitting JSON.
         maxTokens: 1400,
         effort: "low",
@@ -330,7 +353,7 @@ export async function runAgent(
       if (Object.keys(currentSnapshot).length) {
         changes = diffSnapshots(previousSnapshot.snapshot, currentSnapshot);
         await compact.saveRecheck({
-          id: randomUUID(), noteId: volatileNote.id, conversationId,
+          id: randomUUID(), noteId: recheckNote.id, conversationId,
           createdAt: now.toISOString(), query, snapshot: currentSnapshot,
         });
       }

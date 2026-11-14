@@ -43,10 +43,15 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && req.url === "/api/chat") {
       let body = "";
       for await (const c of req) body += c;
-      const { conversationId, message, profile } = JSON.parse(body) as { conversationId: string; message: string; profile?: unknown };
+      const { conversationId, message, profile, timeZone } = JSON.parse(body) as {
+        conversationId: string; message: string; profile?: unknown; timeZone?: unknown;
+      };
       if (!conversationId || !message?.trim()) { res.writeHead(400).end("bad request"); return; }
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
-      await runAgent(deps, conversationId, message, (e) => res.write(`data: ${JSON.stringify(e)}\n\n`), { profile: parseProfile(profile) });
+      await runAgent(deps, conversationId, message, (e) => res.write(`data: ${JSON.stringify(e)}\n\n`), {
+        profile: parseProfile(profile),
+        ...(typeof timeZone === "string" ? { timeZone: timeZone.slice(0, 100) } : {}),
+      });
       res.end();
       return;
     }

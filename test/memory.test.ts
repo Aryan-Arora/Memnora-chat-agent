@@ -7,6 +7,7 @@ import { runAgent, waitForMemoryTasks, type AgentEvent } from "../src/agent/loop
 import { diffSnapshots } from "../src/memory/ledger.js";
 import { assessRelevance, candidateFromNote } from "../src/memory/ingestion.js";
 import { parseNoteExtraction } from "../src/memory/notes.js";
+import { resolveDate } from "../src/memory/dates.js";
 import { buildProfilePrompt, DEFAULT_PROFILE } from "../src/memory/preferences.js";
 import { createSqliteMemory } from "../src/memory/sqlite.js";
 import type { CompletionRequest, MemoryIngestionSource, MemoryNote, ModelAdapter, SearchTool } from "../src/types.js";
@@ -17,6 +18,90 @@ test("note parsing rejects malformed output and snapshot diff stays structured",
   assert.deepEqual(diffSnapshots({ price: 10, available: true }, { price: 12, available: true }), [
     { key: "price", before: 10, after: 12 },
   ]);
+});
+
+test("date phrases resolve in the user's timezone with explicit dates taking priority", () => {
+  const now = new Date("2026-11-10T20:00:00Z"); // 11 November in India
+  assert.deepEqual(resolveDate("What did I ask on Nov 3, and is it still correct today?", now, "Asia/Kolkata"), {
+    from: "2026-11-02T18:30:00.000Z", to: "2026-11-03T18:30:00.000Z", label: "3 november",
+  });
+  assert.equal(resolveDate("What happened on Monday?", now, "Asia/Kolkata")?.from, "2026-11-08T18:30:00.000Z");
+  assert.equal(resolveDate("What happened two days ago?", now, "Asia/Kolkata")?.from, "2026-11-08T18:30:00.000Z");
+  assert.deepEqual(resolveDate("Summarize last week", now, "Asia/Kolkata"), {
+    from: "2026-11-01T18:30:00.000Z", to: "2026-11-08T18:30:00.000Z", label: "last week",
+  });
+  // New York's DST fallback makes this local day 25 hours, not a fixed UTC day.
+  const dst = resolveDate("today", new Date("2026-11-01T12:00:00Z"), "America/New_York");
+  assert.equal(dst?.from, "2026-11-01T04:00:00.000Z");
+  assert.equal(dst?.to, "2026-11-02T05:00:00.000Z");
+});
+
+test("dated re-check recalls first and reuses a saved query without requiring a snapshot", async () => {
+  const memory = createSqliteMemory(":memory:");
+  await memory.saveNote({
+    id: "dated-note", conversationId: "old", createdAt: "2026-11-03T09:00:00Z",
+    topic: "Node.js support", claim: "Node.js 24 was the current release.",
+    sources: ["https://example.com/node"], query: "current Node.js release", volatility: "volatile",
+  });
+  const searched: string[] = [];
+  const contexts: string[] = [];
+  const model: ModelAdapter = {
+    name: "dated-recheck-test",
+    async complete() { return "NO"; },
+    async *stream(req) { contexts.push(req.context ?? ""); yield "Checked."; },
+  };
+  await runAgent({
+    fast: model, main: model, memory,
+    now: () => new Date("2026-11-10T20:00:00Z"),
+    search: { async search(query) { searched.push(query); return [{ title: "Node", url: "https://example.com", snippet: "Current release" }]; } },
+  }, "new", "What did I ask on Nov 3, and is it still correct today?", () => {}, { timeZone: "Asia/Kolkata" });
+  assert.deepEqual(searched, ["current Node.js release"]);
+  assert.match(contexts[0], /Node\.js 24 was the current release/);
+  await waitForMemoryTasks("new");
+  memory.close();
+});
+
+test("an assumed technical feature is verified even when the model router would say no", async () => {
+  const memory = createSqliteMemory(":memory:");
+  const searched: string[] = [];
+  let routerCalls = 0;
+  const model: ModelAdapter = {
+    name: "verification-test",
+    async complete(req) { if (req.system.includes("ROUTER")) routerCalls += 1; return "NO"; },
+    async *stream() { yield "No such feature was found."; },
+  };
+  const question = "How do I enable the Quantum Mode feature in Postgres 17?";
+  await runAgent({
+    fast: model, main: model, memory,
+    search: { async search(query) { searched.push(query); return [{ title: "Postgres docs", url: "https://example.com", snippet: "No Quantum Mode" }]; } },
+  }, "technical", question, () => {});
+  assert.deepEqual(searched, [question]);
+  assert.equal(routerCalls, 0);
+  await waitForMemoryTasks("technical");
+  memory.close();
+});
+
+test("ordinary uses of before and still do not suppress factual web verification", async () => {
+  const memory = createSqliteMemory(":memory:");
+  const searched: string[] = [];
+  let routerCalls = 0;
+  const model: ModelAdapter = {
+    name: "factual-routing-test",
+    async complete(req) { if (req.system.includes("ROUTER")) routerCalls += 1; return "NO"; },
+    async *stream() { yield "Verified."; },
+  };
+  const deps = {
+    fast: model, main: model, memory,
+    search: { async search(query: string) { searched.push(query); return [{ title: "Source", url: "https://example.com", snippet: "Evidence" }]; } },
+  };
+  const questions = ["What did Apple announce before the iPhone 15?", "Is Python still the best first language?"];
+  for (const question of questions) {
+    await runAgent(deps, "facts", question, () => {});
+    await waitForMemoryTasks("facts");
+  }
+  assert.deepEqual(searched, questions);
+  assert.equal(routerCalls, 0);
+  memory.close();
 });
 
 test("agent stores, retrieves and re-checks a volatile note", async () => {
