@@ -37,6 +37,7 @@ Retrieve only a few relevant notes for the next answer
 - **Scoped deletion:** deleting a chat removes that conversation and its derived notes without erasing unrelated history.
 - **Inspectable personalization:** answer length, tone, structure, technical depth, source display, and recommendation style are stored separately from factual memory and remain reversible.
 - **JSON fallback:** SQLite is the primary store, while the original JSON message store remains available if SQLite cannot start.
+- **Bring your own model:** developers select Anthropic or OpenAI and provide their own model and Tavily keys through the local, gitignored `.env` file. Fast/main model IDs can be overridden without changing the agent loop, and credentials never enter browser storage, chat requests, SQLite, or long-term memory.
 
 The SQLite schema indexes both dates and conversations, keeps complete message history for chat reloads, and stores compact notes for model context. FTS5 retrieves only the top few notes instead of sending every prior message to the model.
 
@@ -82,7 +83,7 @@ Agent loop ─── fast routing/extraction model
 
 - TypeScript on Node.js
 - Provider-agnostic model interface
-- Anthropic adapter with a keyless stub fallback
+- Provider-neutral model interface with Anthropic, OpenAI Responses API, and keyless stub adapters
 - Tavily-compatible search wrapper with persistent caching
 - SQLite through Node's built-in `node:sqlite`
 - No frontend build step or framework
@@ -96,6 +97,18 @@ npm run dev
 ```
 
 Open `http://localhost:3040`. With no API keys, the application still starts in stub mode. Secrets belong only in the local, gitignored `.env` file.
+
+Configure one model provider in `.env`:
+
+```dotenv
+MODEL_PROVIDER=openai
+OPENAI_API_KEY=
+FAST_MODEL=gpt-6-luna
+MAIN_MODEL=gpt-6.1-sol
+SEARCH_API_KEY=
+```
+
+For Anthropic, set `MODEL_PROVIDER=anthropic`, fill `ANTHROPIC_API_KEY`, and choose compatible Claude model IDs. Provider keys are not interchangeable because each provider has a different endpoint and protocol. If `MODEL_PROVIDER` is omitted, MiniMe uses the configured Anthropic key first, then OpenAI, then stub mode.
 
 ## Verify
 

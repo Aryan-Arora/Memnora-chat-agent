@@ -132,6 +132,11 @@ button:focus-visible, textarea:focus-visible, summary:focus-visible, a:focus-vis
 .msg ul, .msg ol { margin: 0 0 .9em; padding-left: 1.3em; }
 .msg li + li { margin-top: .3em; }
 .msg blockquote { margin: .9em 0; padding: .25em 0 .25em 13px; color: var(--muted); border-left: 3px solid color-mix(in srgb, var(--accent) 35%, var(--line)); }
+.msg .table-wrap { margin: .9em 0; overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }
+.msg table { width: 100%; border-collapse: collapse; font-size: .92em; }
+.msg th, .msg td { padding: 8px 12px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+.msg th { background: var(--surface-soft); font-weight: 600; white-space: nowrap; }
+.msg tbody tr:last-child td { border-bottom: 0; }
 .msg code { padding: .12em .38em; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-soft); font: .87em ui-monospace, SFMono-Regular, Menlo, monospace; }
 .msg a { color: var(--accent-strong); text-decoration-color: color-mix(in srgb, var(--accent) 35%, transparent); text-underline-offset: 3px; }
 .status { display: flex; align-items: center; gap: 9px; margin-top: 3px; margin-bottom: 14px; color: var(--accent-strong); font-size: .74rem; font-weight: 650; }
@@ -177,8 +182,8 @@ button:focus-visible, textarea:focus-visible, summary:focus-visible, a:focus-vis
 /* Personalization is a parallel task, so it arrives as an anchored side sheet. */
 .personalize-scrim { position: fixed; z-index: 40; inset: 0; visibility: hidden; padding: 0; opacity: 0; border: 0; background: rgba(7,8,14,.38); backdrop-filter: blur(5px); cursor: default; transition: opacity 180ms ease, visibility 180ms; }
 .personalize-panel { position: fixed; z-index: 41; top: 12px; right: 12px; bottom: 12px; display: flex; width: min(470px, calc(100vw - 24px)); padding: 28px; overflow-y: auto; flex-direction: column; visibility: hidden; opacity: 0; border: 1px solid color-mix(in srgb, var(--line-strong) 80%, white); border-radius: 24px; background: color-mix(in srgb, var(--surface) 91%, transparent); backdrop-filter: blur(30px) saturate(170%); box-shadow: 0 34px 100px rgba(10,11,23,.27), inset 0 1px 0 rgba(255,255,255,.7); transform: translateX(24px) scale(.985); transform-origin: top right; transition: transform 260ms cubic-bezier(.2,.8,.2,1), opacity 180ms ease, visibility 260ms; }
-.personalize-open .personalize-scrim { visibility: visible; opacity: 1; }
-.personalize-open .personalize-panel { visibility: visible; opacity: 1; transform: translateX(0) scale(1); }
+.personalize-open #personalize-scrim { visibility: visible; opacity: 1; }
+.personalize-open #personalize-panel { visibility: visible; opacity: 1; transform: translateX(0) scale(1); }
 .personalize-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
 .panel-kicker { margin: 0 0 8px; color: var(--accent-strong); font-size: .65rem; font-weight: 760; letter-spacing: .13em; text-transform: uppercase; }
 .personalize-head h2 { max-width: 11em; margin: 0; font-size: 1.75rem; font-weight: 620; line-height: 1.08; letter-spacing: -.045em; }
@@ -241,7 +246,7 @@ button:focus-visible, textarea:focus-visible, summary:focus-visible, a:focus-vis
   .composer-wrap { padding: 8px 9px calc(9px + env(safe-area-inset-bottom)); }
   .composer-wrap > p { display: none; }
   .personalize-panel { top: auto; right: 0; bottom: 0; left: 0; width: 100%; max-height: min(90vh, 760px); padding: 22px 18px calc(18px + env(safe-area-inset-bottom)); border-radius: 24px 24px 0 0; transform: translateY(32px) scale(.99); transform-origin: bottom center; }
-  .personalize-open .personalize-panel { transform: translateY(0) scale(1); }
+  .personalize-open #personalize-panel { transform: translateY(0) scale(1); }
 }
 
 @media (max-width: 480px) {

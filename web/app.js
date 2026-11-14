@@ -107,7 +107,23 @@ function markdown(text) {
     if (listType && listType !== type) flushList();
     listType = type; items.push(value);
   };
-  for (const line of text.split("\n")) {
+  const lines = text.split("\n");
+  const cells = (l) => l.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+  const isRule = (l) => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(l) && l.includes("-");
+  for (let n = 0; n < lines.length; n++) {
+    const line = lines[n];
+    // GitHub-style table: a header row with pipes followed by a --- rule row.
+    if (line.includes("|") && n + 1 < lines.length && isRule(lines[n + 1])) {
+      flushPara(); flushList();
+      const head = cells(line);
+      const rows = [];
+      n += 2;
+      while (n < lines.length && lines[n].includes("|") && lines[n].trim()) rows.push(cells(lines[n++]));
+      n--;
+      out.push(`<div class="table-wrap"><table><thead><tr>${head.map((c) => `<th>${inline(c)}</th>`).join("")}</tr></thead><tbody>${
+        rows.map((r) => `<tr>${head.map((_, i) => `<td>${inline(r[i] ?? "")}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`);
+      continue;
+    }
     const heading = line.match(/^(#{2,3})\s+(.+)$/);
     const bullet = line.match(/^\s*[-*]\s+(.*)$/);
     const numbered = line.match(/^\s*\d+[.)]\s+(.*)$/);
@@ -239,7 +255,7 @@ async function send(message) {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ conversationId, message }),
+      body: JSON.stringify({ conversationId, message, profile: loadProfile() }),
     });
     if (!res.ok || !res.body) throw new Error(`Server returned ${res.status}`);
 

@@ -185,6 +185,7 @@ export async function runAgent(
   conversationId: string,
   userText: string,
   emit: (e: AgentEvent) => void,
+  opts: { profile?: UserProfile } = {},
 ): Promise<void> {
   const started = performance.now();
   let memoryDone = started, routeStarted = started, routeDone = started;
@@ -339,7 +340,9 @@ export async function runAgent(
     let answer = "";
     modelStarted = performance.now();
     const mainIterator = deps.main.stream({
-      system: ANSWER_SYSTEM,
+      // Preferences change rarely, so they sit in the cached system block, not the per-question
+      // context: a changed setting costs one cache miss, then it is cached again.
+      system: opts.profile ? `${ANSWER_SYSTEM}\n\n${buildProfilePrompt(opts.profile)}` : ANSWER_SYSTEM,
       context: buildContext(now.toISOString().slice(0, 10), pastChat, retrievedNotes, results, searchFailed, changes),
       messages: [...thisChat, userMsg].map((m) => ({ role: m.role, content: m.content })),
       onUsage: track(deps.main),

@@ -33,3 +33,25 @@ export function buildProfilePrompt(profile: UserProfile): string {
     "Preferences affect presentation only. Evidence and factual standards do not change.",
   ].join("\n");
 }
+
+const pick = <T extends string>(v: unknown, allowed: readonly T[], fallback: T): T =>
+  typeof v === "string" && (allowed as readonly string[]).includes(v) ? (v as T) : fallback;
+
+/**
+ * The browser sends preferences with every chat request. Treat them as untrusted: every field
+ * is checked against a fixed set of values, so a crafted request cannot put free text
+ * (a prompt injection) into the system prompt. Learned `signals` are never accepted from the client.
+ */
+export function parseProfile(input: unknown): UserProfile {
+  const o = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+  const d = DEFAULT_PROFILE;
+  return {
+    ...d,
+    answerLength: pick(o.answerLength, ["concise", "balanced", "detailed"] as const, d.answerLength),
+    tone: pick(o.tone, ["direct", "warm", "formal"] as const, d.tone),
+    structure: pick(o.structure, ["prose", "mixed", "bullets"] as const, d.structure),
+    leadWithRecommendation: typeof o.leadWithRecommendation === "boolean" ? o.leadWithRecommendation : d.leadWithRecommendation,
+    compareInTables: typeof o.compareInTables === "boolean" ? o.compareInTables : d.compareInTables,
+    adaptiveLearning: false,
+  };
+}
