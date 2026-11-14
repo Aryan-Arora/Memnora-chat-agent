@@ -61,13 +61,15 @@ test("dated re-check recalls first and reuses a saved query without requiring a 
   memory.close();
 });
 
-test("an assumed technical feature is verified even when the model router would say no", async () => {
+test("an assumed technical feature is still searched when the router's reply is unreadable", async () => {
   const memory = createSqliteMemory(":memory:");
   const searched: string[] = [];
   let routerCalls = 0;
   const model: ModelAdapter = {
     name: "verification-test",
-    async complete(req) { if (req.system.includes("ROUTER")) routerCalls += 1; return "NO"; },
+    // Whether to search is the router model's call (measured in bench/routing.ts). What a
+    // unit test can pin is the safety net: a reply that is neither NO nor SEARCH still searches.
+    async complete(req) { if (req.system.includes("ROUTER")) { routerCalls += 1; return "Let me think about that."; } return "NO"; },
     async *stream() { yield "No such feature was found."; },
   };
   const question = "How do I enable the Quantum Mode feature in Postgres 17?";
@@ -76,18 +78,22 @@ test("an assumed technical feature is verified even when the model router would 
     search: { async search(query) { searched.push(query); return [{ title: "Postgres docs", url: "https://example.com", snippet: "No Quantum Mode" }]; } },
   }, "technical", question, () => {});
   assert.deepEqual(searched, [question]);
-  assert.equal(routerCalls, 0);
+  assert.equal(routerCalls, 1);
   await waitForMemoryTasks("technical");
   memory.close();
 });
 
-test("ordinary uses of before and still do not suppress factual web verification", async () => {
+test("ordinary uses of before and still reach the router instead of being treated as memory questions", async () => {
   const memory = createSqliteMemory(":memory:");
   const searched: string[] = [];
   let routerCalls = 0;
   const model: ModelAdapter = {
     name: "factual-routing-test",
-    async complete(req) { if (req.system.includes("ROUTER")) routerCalls += 1; return "NO"; },
+    async complete(req) {
+      if (!req.system.includes("ROUTER")) return "NO";
+      routerCalls += 1;
+      return `SEARCH: router query ${routerCalls}`;
+    },
     async *stream() { yield "Verified."; },
   };
   const deps = {
@@ -99,8 +105,8 @@ test("ordinary uses of before and still do not suppress factual web verification
     await runAgent(deps, "facts", question, () => {});
     await waitForMemoryTasks("facts");
   }
-  assert.deepEqual(searched, questions);
-  assert.equal(routerCalls, 0);
+  assert.deepEqual(searched, ["router query 1", "router query 2"]);
+  assert.equal(routerCalls, 2);
   memory.close();
 });
 
@@ -108,7 +114,6 @@ test("agent stores, retrieves and re-checks a volatile note", async () => {
   const memory = createSqliteMemory(":memory:");
   const searched: string[] = [];
   const contexts: string[] = [];
-  let snapshotCalls = 0;
   let routerCalls = 0;
 
   const fast: ModelAdapter = {
@@ -117,10 +122,6 @@ test("agent stores, retrieves and re-checks a volatile note", async () => {
       if (req.system.includes("ROUTER")) {
         routerCalls += 1;
         return routerCalls === 1 ? "SEARCH: Acme plan price" : "SEARCH: generic router query";
-      }
-      if (req.system.includes("current key values")) {
-        snapshotCalls += 1;
-        return JSON.stringify({ monthly_price_usd: 12 });
       }
       return JSON.stringify({
         topic: "Acme hosting price", claim: "Acme costs $10 monthly",
@@ -145,6 +146,7 @@ test("agent stores, retrieves and re-checks a volatile note", async () => {
   await waitForMemoryTasks("chat");
   const notes = await memory.retrieve("Acme hosting price");
   assert.equal(notes.length, 1);
+  assert.ok(notes[0].createdAt.startsWith("2026-11-10T12:00"), "notes are dated by the injected clock, not the machine clock");
   assert.deepEqual((await memory.latestRecheck(notes[0].id))?.snapshot, { monthly_price_usd: 10 });
 
   const events: AgentEvent[] = [];
@@ -155,11 +157,13 @@ test("agent stores, retrieves and re-checks a volatile note", async () => {
     (event) => events.push(event),
   );
   await waitForMemoryTasks("chat");
-  assert.equal(searched.at(-1), "What is the Acme hosting price?", "re-check should reuse the exact first query");
-  assert.equal(routerCalls, 0, "obvious freshness and stored-query routes should skip the model router");
-  assert.equal(snapshotCalls, 1);
-  assert.match(contexts.at(-1) ?? "", /"before": 10/);
-  assert.match(contexts.at(-1) ?? "", /"after": 12/);
+  assert.deepEqual(searched, ["Acme plan price", "Acme plan price"], "re-check should reuse the exact first query");
+  assert.equal(routerCalls, 1, "the re-check reuses the saved query without asking the router again");
+  // The answer model gets the saved values and today's results side by side and compares them itself.
+  assert.match(contexts.at(-1) ?? "", /Values saved on 2026-11-10 with the answer about "Acme hosting price"/);
+  assert.match(contexts.at(-1) ?? "", /\{"monthly_price_usd":10\}/);
+  assert.match(contexts.at(-1) ?? "", /Acme now costs \$12 monthly/);
+  assert.deepEqual((await memory.latestRecheck(notes[0].id))?.snapshot, { monthly_price_usd: 10 }, "a re-check must not move the baseline");
   const memoryEvent = events.find((event) => event.type === "memory");
   assert.ok(memoryEvent?.type === "memory" && memoryEvent.notes?.[0].topic === "Acme hosting price");
   memory.close();

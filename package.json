@@ -9,7 +9,8 @@
     "typecheck": "tsc --noEmit",
     "bench": "tsx bench/run.ts",
     "bench:memory": "tsx bench/memory.ts",
-    "bench:live": "tsx bench/live.ts"
+    "bench:live": "tsx bench/live.ts",
+    "bench:routing": "tsx bench/routing.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

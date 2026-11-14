@@ -12,7 +12,7 @@ const models = createModels();
 if (!models.live || !process.env.SEARCH_API_KEY) throw new Error("bench:live requires ANTHROPIC_API_KEY and SEARCH_API_KEY");
 const memory = createSqliteMemory(":memory:");
 // Seed a dated volatile memory so the paid benchmark exercises the flagship path:
-// recall the old answer, reuse its original query, search, and compute a fresh diff.
+// recall the old answer, reuse its original query, search, and compare saved values with today's.
 await memory.saveNote({
   id: "flagship-node", conversationId: "earlier-chat", createdAt: "2026-11-03T09:00:00Z",
   topic: "Node.js LTS version", claim: "Node.js 24 was the active LTS release.",
@@ -35,7 +35,7 @@ const rows = [];
 let flagshipAnswer = "";
 for (const question of questions) {
   const started = performance.now();
-  let firstToken = 0, preview = 0, searches = 0, memoryNotes = 0, tokens = 0, cost = 0, error = "", answer = "";
+  let firstToken = 0, searches = 0, memoryNotes = 0, tokens = 0, cost = 0, error = "", answer = "";
   let timing: AgentTiming | undefined;
   await runAgent({
     fast: models.fast, main: models.main, search: createTavilySearch(), memory,
@@ -48,7 +48,6 @@ for (const question of questions) {
   }, randomUUID(), question, (event: AgentEvent) => {
     if (event.type === "token" && !firstToken) firstToken = performance.now() - started;
     if (event.type === "token") answer += event.text;
-    if (event.type === "preview" && !preview) preview = performance.now() - started;
     if (event.type === "sources") searches += 1;
     if (event.type === "memory") memoryNotes += event.notes?.length ?? 0;
     if (event.type === "error") error = event.text;
@@ -58,7 +57,6 @@ for (const question of questions) {
   await waitForMemoryTasks();
   rows.push({
     question: question.slice(0, 48), firstTokenMs: Math.round(firstToken),
-    previewMs: Math.round(preview),
     totalMs: Math.round(userVisibleTotal), searches, memoryNotes, tokens,
     routerMs: timing?.routerMs ?? 0, searchMs: timing?.searchMs ?? 0,
     modelStartupMs: timing?.modelStartupMs ?? 0, streamMs: timing?.streamMs ?? 0,

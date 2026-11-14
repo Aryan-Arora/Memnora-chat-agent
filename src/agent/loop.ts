@@ -1,33 +1,30 @@
 // The agent loop: remember -> route -> (search) -> answer.
-//   1. Local memory lookup (milliseconds), then the fast-model router. They are sequential
-//      because the router needs the recent turns to rewrite follow-ups; if a slower memory
-//      step (FTS, embeddings) is added, run it in parallel with the router.
-//   2. If the router says SEARCH, run the search; if search fails, answer anyway and say so.
-//   3. Main model writes the answer, streamed. Stable instructions go in `system` (cacheable),
-//      everything that changes per question goes in `context`.
-// Events are emitted as they happen so the UI feels fast.
+//   1. Memory lookup (local, milliseconds): resolve any date in the message and recall notes.
+//   2. Route (router.ts): decide whether to search and with what query. A re-check reuses
+//      the query saved with the old answer.
+//   3. Search, if the route asked for it. If the search fails, answer anyway and say so.
+//   4. The main model writes the answer, streamed. Stable instructions go in `system`
+//      (cacheable); everything that changes per question goes in `context`.
+//   5. After the answer, a background job turns the exchange into a dated note.
+// Events are emitted as they happen so the UI can show progress.
 import { randomUUID } from "node:crypto";
 import { resolveDate } from "../memory/dates.js";
-import { diffSnapshots } from "../memory/ledger.js";
 import { assessRelevance, candidateFromNote } from "../memory/ingestion.js";
 import { buildProfilePrompt } from "../memory/preferences.js";
 import {
   buildNoteExtractionPrompt,
-  buildSnapshotExtractionPrompt,
   NOTE_EXTRACTION_SYSTEM,
   parseNoteExtraction,
-  parseSnapshot,
-  SNAPSHOT_EXTRACTION_SYSTEM,
   snapshotFromNoteExtraction,
 } from "../memory/notes.js";
 import type {
-  MemoryIngestionSource, MemoryNote, MemoryStore, Message, ModelAdapter, NoteMemoryStore, SearchResult,
-  SearchTool, SnapshotChange, Usage, UserProfile,
+  MemoryIngestionSource, MemoryNote, MemoryStore, Message, ModelAdapter, NoteMemoryStore, RecheckEntry,
+  SearchResult, SearchTool, Usage, UserProfile,
 } from "../types.js";
+import { route } from "./router.js";
 
 export type AgentEvent =
   | { type: "status"; text: string }
-  | { type: "preview"; text: string }
   | { type: "token"; text: string }
   | { type: "sources"; sources: { title: string; url: string; publishedAt?: string }[] }
   | { type: "memory"; text: string; notes?: Pick<MemoryNote, "topic" | "claim" | "createdAt" | "volatility">[] }
@@ -39,7 +36,7 @@ export interface AgentDeps {
   main: ModelAdapter;
   search: SearchTool;
   memory: MemoryStore;
-  now?: () => Date; // injectable so the benchmark can pin "today"
+  now?: () => Date; // injectable so tests and benchmarks can pin "today"
   /** Optional: receives token usage for every model call (benchmark cost tracking). */
   onUsage?: (model: string, u: Usage) => void;
   onTiming?: (timing: AgentTiming) => void;
@@ -55,17 +52,10 @@ export interface AgentTiming {
   memoryMs: number;
   routerMs: number;
   searchMs: number;
-  snapshotMs: number;
   modelStartupMs: number;
   streamMs: number;
   totalMs: number;
 }
-
-const ROUTER_SYSTEM = `ROUTER. Decide if the user's latest message needs fresh web information.
-Reply with exactly "NO" or "SEARCH: <a concise, self-contained search query>".
-Search for: recent events, prices, versions, "what changed since", anything that may have changed.
-Do not search for: stable facts, chit-chat, questions about this conversation.
-Use the recent conversation to resolve follow-ups ("the second one") into a full query.`;
 
 // Stable on purpose: no dates, no per-question data, so the provider can cache it.
 const ANSWER_SYSTEM = `You are a fast, direct chat assistant. Be concise but complete, with no padding.
@@ -73,34 +63,77 @@ Lead with the direct answer. For anything beyond a one-paragraph reply, organize
 Use numbered steps for procedures and bold labels for compact comparisons. Do not add headings to a simple answer.
 Keep paragraphs short and put caveats beside the claim they qualify instead of in a generic disclaimer section.
 When earlier conversation is provided, use its timestamps to answer questions about what was asked and when.
-If asked to re-check an earlier answer, compare it with the fresh web results and say plainly what changed and what did not.
-Cite web results as [n]. If sources conflict, say so. If the question assumes something that does not exist, say that.
+When asked whether an earlier answer still holds, or what has changed since it, work in this order, even if the preferences below say to lead with the conclusion:
+1. One sentence saying what was asked or saved, and on which date.
+2. The comparison, one saved value at a time: what it was then, what today's web results say now, and a status of unchanged, changed, or not confirmed. Use a table for three or more values. "Not confirmed" means today's results do not state the value; it is never a change.
+3. The verdict, in one or two sentences, after the comparison.
+Cite web results as [n]. If sources conflict, say so and give more weight to the most recently dated one. If the question assumes something that does not exist, say that.
 If the question is vague, ask one clarifying question instead of guessing.
 If a search failed or returned nothing, say you could not check the web instead of guessing.`;
 
-const PREVIEW_SYSTEM = `Give one provisional sentence from the supplied web evidence so the user has an immediate orientation.
-Cite sources as [n]. If the evidence is uncertain or conflicting, say so. Do not add detail and do not guess.`;
+// Dates shown to the model are the user's local calendar dates, so "on 3 November" in the
+// question and the date printed on a note mean the same day wherever the user is.
+function localClock(timeZone?: string) {
+  let zone = "UTC";
+  try {
+    if (timeZone) { new Intl.DateTimeFormat("en", { timeZone }); zone = timeZone; }
+  } catch { /* unknown zone: keep UTC */ }
+  const format = new Intl.DateTimeFormat("en-CA", {
+    timeZone: zone, weekday: "long", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  });
+  const parts = (date: Date) => Object.fromEntries(format.formatToParts(date).map((part) => [part.type, part.value]));
+  return {
+    /** "Sunday 2026-11-15" */
+    today(date: Date): string {
+      const p = parts(date);
+      return `${p.weekday} ${p.year}-${p.month}-${p.day}`;
+    },
+    /** "2026-11-09 15:30" */
+    stamp(iso: string): string {
+      const date = new Date(iso);
+      if (Number.isNaN(date.getTime())) return iso;
+      const p = parts(date);
+      return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}`;
+    },
+  };
+}
 
-function buildContext(
-  today: string,
-  pastChat: Message[],
-  notes: MemoryNote[],
-  results: SearchResult[],
-  searchFailed: boolean,
-  changes: SnapshotChange[],
-): string {
-  const parts = [`Today is ${today}.`];
+// The date a snapshot was taken is printed above it. Some snapshots also store that date as
+// a value ("as_of", "observed_on"). Shown to the answer model it reads as a saved fact, and
+// it was reported to the user as something that changed.
+const BOOKKEEPING_KEY = /^(as_of|observed_on|checked_on|recorded_on|retrieved_on|snapshot_date|date)$/;
+
+function buildContext(input: {
+  today: string;
+  stamp: (iso: string) => string;
+  notes: MemoryNote[];
+  /** The note being re-checked and the values saved with it, when this is a re-check. */
+  recheck: { note: MemoryNote; saved: RecheckEntry } | null;
+  pastChat: Message[];
+  pastChatLabel: string;
+  results: SearchResult[];
+  searchFailed: boolean;
+}): string {
+  const { today, stamp, notes, recheck, pastChat, pastChatLabel, results, searchFailed } = input;
+  const parts = [`Today is ${today} (the user's local date).`];
   if (notes.length) {
     parts.push(
       `Relevant memory notes (compact records, not fresh evidence):\n` +
-        notes.map((note) => `[${note.createdAt}] ${note.topic}: ${note.claim}`).join("\n"),
+        notes.map((note) => `[${stamp(note.createdAt)}] ${note.topic}: ${note.claim}`).join("\n"),
+    );
+  }
+  const savedValues = Object.fromEntries(
+    Object.entries(recheck?.saved.snapshot ?? {}).filter(([key]) => !BOOKKEEPING_KEY.test(key)),
+  );
+  if (recheck && Object.keys(savedValues).length) {
+    parts.push(
+      `Values saved on ${stamp(recheck.saved.createdAt).slice(0, 10)} with the answer about "${recheck.note.topic}" ` +
+        `(the baseline for what changed):\n${JSON.stringify(savedValues)}`,
     );
   }
   if (pastChat.length) {
-    parts.push(
-      `Earlier conversation from the date the user mentioned:\n` +
-        pastChat.map((m) => `[${m.createdAt}] ${m.role}: ${m.content}`).join("\n"),
-    );
+    parts.push(`${pastChatLabel}:\n` + pastChat.map((m) => `[${stamp(m.createdAt)}] ${m.role}: ${m.content}`).join("\n"));
   }
   if (results.length) {
     parts.push(
@@ -111,9 +144,6 @@ function buildContext(
     );
   }
   if (searchFailed) parts.push("The web search failed. Tell the user you could not check the web.");
-  if (changes.length) {
-    parts.push(`Structured changes since the saved snapshot:\n${JSON.stringify(changes, null, 2)}`);
-  }
   return parts.join("\n\n");
 }
 
@@ -124,19 +154,15 @@ function noteStore(memory: MemoryStore): NoteMemoryStore | null {
     : null;
 }
 
-// “before” and “still” alone describe ordinary factual questions too; treating them as
-// memory cues caused questions about Apple and Python to skip web verification.
-const PAST_CUE = /\b(remember|earlier|previous|last time|we discussed|we decided|i asked|you said|re-?check|changed since)\b/i;
-const CROSS_CHAT_CUE = /\b(summar(?:y|ize)|recap|other chat|previous chat|last chat|past chat|earlier chat|another chat|conversation)\b/i;
-const RECHECK_CUE = /\b(re-?check|changed|change since|still|now|current|latest|today)\b/i;
-const FRESH_CUE = /\b(latest|current|today|news|price|pricing|version|release|available|availability)\b/i;
-const AMBIGUOUS_REFERENCE = /\b(it|they|them|that|those|one|ones|second|first|best)\b/i;
-const UNRESOLVED_REFERENCE = /\b(it|they|them|that|those|one|ones)\b/i;
-const STABLE_CUE = /\b(capital of|chemical symbol for|square root of|who wrote|author of)\b/i;
-// Assumed product features are a common hallucination trap. Verify their existence instead
-// of trusting a router that may mistake a procedural-looking question for timeless advice.
-const TECH_VERIFICATION_CUE = /\b(enable|configure|install|setup|feature|mode|api|sdk|plugin|integration|version|postgres|database|framework|library)\b/i;
-const FACTUAL_QUESTION_CUE = /^\s*(who|what|when|where|which|is|are|was|were|does|did|has|have|can)\b/i;
+// Recall cues. They only decide whether to look in memory, which is local and takes
+// milliseconds. Whether to search the web is decided in router.ts.
+// "I asked", "did we decide", "you told me", "last time": the user means our own history.
+// Bare "earlier", "previous", "before" and "still" are deliberately absent: they describe
+// ordinary questions too ("the previous iPhone") and used to switch the web search off.
+const SAID_BEFORE = /\b(?:i|we|you)\s+(?:asked|said|told|talked|discussed|decided|mentioned|recommended|suggested|shortlisted)\b|\bdid\s+(?:i|we|you)\s+(?:ask|say|tell|talk|discuss|decide|mention|recommend|suggest)\b|\b(?:remember|recall|last time|re-?check|changed since)\b/i;
+// "my previous chat", "the other conversation": a different chat from this one. A bare
+// "conversation" or "summarize" is not enough ("how do I start a conversation?").
+const OTHER_CHAT = /\b(?:previous|last|other|earlier|past|another|prior)\s+(?:chat|conversation|session|discussion|thread)s?\b/i;
 const pendingMemory = new Map<string, Promise<void>>();
 
 /** Tests and graceful shutdown use this; normal requests only await their own conversation. */
@@ -202,26 +228,27 @@ export async function runAgent(
 ): Promise<void> {
   const started = performance.now();
   let memoryDone = started, routeStarted = started, routeDone = started;
-  let searchStarted = 0, searchDone = 0, snapshotStarted = 0, snapshotDone = 0;
+  let searchStarted = 0, searchDone = 0;
   let modelStarted = 0, firstTokenAt = 0, modelDone = 0;
   const now = (deps.now ?? (() => new Date()))();
+  const clock = localClock(opts.timeZone);
   const track = (m: ModelAdapter) => (u: Usage) => deps.onUsage?.(m.name, u);
   try {
-    const crossChatRecall = CROSS_CHAT_CUE.test(userText);
     const compact = noteStore(deps.memory);
-    // Cross-chat recall must also see extraction that just finished in another chat.
-    await waitForMemoryTasks(crossChatRecall ? undefined : conversationId);
-    if (compact && (crossChatRecall || PAST_CUE.test(userText) || resolveDate(userText, now, opts.timeZone))) {
-      await drainIngestionJobs(deps, compact); // recover jobs left by an earlier process
-    }
+    const range = resolveDate(userText, now, opts.timeZone);
+    const saidBefore = SAID_BEFORE.test(userText);
+    const otherChat = OTHER_CHAT.test(userText);
+    const shouldRecall = Boolean(range || saidBefore || otherChat);
+    // Recall must see notes whose extraction has only just finished: this chat's, or every
+    // chat's when the user asks about another chat.
+    await waitForMemoryTasks(otherChat ? undefined : conversationId);
+    if (compact && shouldRecall) await drainIngestionJobs(deps, compact); // recover jobs left by an earlier process
     const userMsg: Message = {
       id: randomUUID(), role: "user", content: userText, createdAt: now.toISOString(), conversationId,
     };
     emit({ type: "status", text: "Thinking" });
 
     // Memory lookup happens BEFORE saving this message, so "today" doesn't echo it back.
-    const range = resolveDate(userText, now, opts.timeZone);
-    const shouldRecall = Boolean(range || PAST_CUE.test(userText) || crossChatRecall);
     // Note retrieval and recent-chat loading are independent and run together.
     const [retrievedNotes, recent] = await Promise.all([
       compact && shouldRecall ? compact.retrieve(userText, range ?? undefined, 5) : Promise.resolve([]),
@@ -229,7 +256,7 @@ export async function runAgent(
     ]);
     // Generic "previous chat" requests have no topic for FTS. Fall back to the newest
     // conversation other than this one; topic-specific requests still prefer compact notes.
-    const otherMessages = crossChatRecall
+    const otherMessages = otherChat
       ? recent.filter((message) => message.conversationId !== conversationId)
       : [];
     const previousConversationId = otherMessages.at(-1)?.conversationId;
@@ -239,7 +266,7 @@ export async function runAgent(
     // Old history may predate note extraction, so raw messages remain a reliable fallback.
     const pastChat = !retrievedNotes.length && range
       ? await deps.memory.between(range.from, range.to)
-      : !retrievedNotes.length && crossChatRecall ? previousChat : [];
+      : !retrievedNotes.length && otherChat ? previousChat : [];
     const thisChat = recent.filter((m) => m.conversationId === conversationId).slice(-10);
     memoryDone = performance.now();
     if (retrievedNotes.length) {
@@ -258,69 +285,26 @@ export async function runAgent(
     }
     await deps.memory.save(userMsg);
 
-    // The router gets the recent turns as ONE classification message (trimmed), not as real
-    // chat turns: as real turns a chatty model answers the user instead of classifying, and
-    // long earlier answers waste tokens. maxTokens is generous because some models spend part
-    // of the budget on hidden reasoning; at 80 that left an empty reply and silently skipped search.
-    const transcript = thisChat
-      .slice(-4)
-      .map((m) => `${m.role}: ${m.content.slice(0, 300)}`)
-      .join("\n");
-    const routerInput = `${transcript ? `Recent conversation:\n${transcript}\n\n` : ""}Latest user message:\n${userText}\n\nReply now with exactly NO or SEARCH: <query>.`;
-    const recheckNote = RECHECK_CUE.test(userText)
-      ? retrievedNotes.find((note) => note.volatility === "volatile" && note.query)
-        ?? retrievedNotes.find((note) => note.query)
-      : undefined;
-    const previousSnapshot = compact && recheckNote
-      ? await compact.latestRecheck(recheckNote.id)
-      : null;
-    let query: string;
-    let routeSource: string;
     routeStarted = performance.now();
-    if (recheckNote?.query) {
-      // Recall first, then reuse the query that produced the old answer. A structured
-      // snapshot improves the comparison but is not required to perform the re-check.
-      query = recheckNote.query;
-      routeSource = "stored query";
-    } else if (shouldRecall && !FRESH_CUE.test(userText)) {
-      query = "";
-      routeSource = "memory-only rule";
-    } else if (FRESH_CUE.test(userText) && !AMBIGUOUS_REFERENCE.test(userText)) {
-      query = userText.slice(0, 200);
-      routeSource = "freshness rule";
-    } else if (STABLE_CUE.test(userText)) {
-      query = "";
-      routeSource = "stable-fact rule";
-    } else if (TECH_VERIFICATION_CUE.test(userText)) {
-      query = userText.slice(0, 200);
-      routeSource = "technical verification rule";
-    } else if (!shouldRecall && FACTUAL_QUESTION_CUE.test(userText) && !UNRESOLVED_REFERENCE.test(userText)) {
-      query = userText.slice(0, 200);
-      routeSource = "factual verification rule";
-    } else if (/^\s*(hi|hello|hey|thanks|thank you|good (morning|afternoon|evening))\b/i.test(userText)) {
-      query = "";
-      routeSource = "chitchat rule";
-    } else {
-      const rawRoute = (
-        await deps.fast.complete({
-          system: ROUTER_SYSTEM,
-          messages: [{ role: "user", content: routerInput }],
-          maxTokens: 400,
-          effort: "medium",
-          onUsage: track(deps.fast),
-        })
-      ).trim();
-      // Fail toward searching: an empty or unparseable reply must never mean "skip the web".
-      const sm = rawRoute.match(/SEARCH:\s*(.+)/i);
-      query = sm ? sm[1].trim() : /^NO\b/i.test(rawRoute) ? "" : userText.slice(0, 200);
-      routeSource = sm || /^NO\b/i.test(rawRoute) ? "model" : "model fallback";
-    }
+    const decision = await route(deps.fast, {
+      userText,
+      today: clock.today(now),
+      recentTurns: thisChat.slice(-4),
+      notes: retrievedNotes,
+    }, track(deps.fast));
     routeDone = performance.now();
-    console.log(`[router] ${JSON.stringify(userText.slice(0, 60))} -> ${query ? `SEARCH ${JSON.stringify(query)}` : "NO"} (${routeSource})`);
+    const { query } = decision;
+    console.log(`[router] ${JSON.stringify(userText.slice(0, 60))} -> ${query ? `SEARCH ${JSON.stringify(query)}` : "NO"} (${decision.source})`);
+
+    // Re-check: the values saved with the old answer are the baseline for "what changed".
+    // The main model compares them with today's results itself and shows the comparison.
+    // A separate fast-model call used to extract today's values and code diffed the two, but
+    // it added 2.3 to 4.4 seconds before the first word and reported values missing from
+    // today's results as changes.
+    const saved = compact && decision.recheckNote ? await compact.latestRecheck(decision.recheckNote.id) : null;
 
     let results: SearchResult[] = [];
     let searchFailed = false;
-    let changes: SnapshotChange[] = [];
     if (query) {
       searchStarted = performance.now();
       emit({ type: "status", text: `Searching: ${query}` });
@@ -338,75 +322,58 @@ export async function runAgent(
       }
       searchDone = performance.now();
     }
-
-    if (compact && recheckNote && previousSnapshot && results.length) {
-      snapshotStarted = performance.now();
-      const rawSnapshot = await deps.fast.complete({
-        system: SNAPSHOT_EXTRACTION_SYSTEM,
-        messages: [{ role: "user", content: buildSnapshotExtractionPrompt(recheckNote.claim, previousSnapshot.snapshot, results) }],
-        // Reasoning models may spend much of this budget invisibly before emitting JSON.
-        maxTokens: 1400,
-        effort: "low",
-        onUsage: track(deps.fast),
+    // Say what happens next, so a pause before the first word is not a blank screen.
+    if (results.length) {
+      emit({
+        type: "status",
+        text: saved
+          ? `Comparing with what was saved on ${clock.stamp(saved.createdAt).slice(0, 10)}`
+          : `Reading ${results.length} source${results.length === 1 ? "" : "s"}`,
       });
-      const currentSnapshot = parseSnapshot(rawSnapshot);
-      if (Object.keys(currentSnapshot).length) {
-        changes = diffSnapshots(previousSnapshot.snapshot, currentSnapshot);
-        await compact.saveRecheck({
-          id: randomUUID(), noteId: recheckNote.id, conversationId,
-          createdAt: now.toISOString(), query, snapshot: currentSnapshot,
-        });
-      }
-      snapshotDone = performance.now();
     }
 
     let answer = "";
     modelStarted = performance.now();
-    const mainIterator = deps.main.stream({
+    const stream = deps.main.stream({
       // Preferences change rarely, so they sit in the cached system block, not the per-question
       // context: a changed setting costs one cache miss, then it is cached again.
       system: opts.profile ? `${ANSWER_SYSTEM}\n\n${buildProfilePrompt(opts.profile)}` : ANSWER_SYSTEM,
-      context: buildContext(now.toISOString().slice(0, 10), pastChat, retrievedNotes, results, searchFailed, changes),
+      context: buildContext({
+        today: clock.today(now),
+        stamp: clock.stamp,
+        notes: retrievedNotes,
+        recheck: decision.recheckNote && saved ? { note: decision.recheckNote, saved } : null,
+        pastChat,
+        pastChatLabel: range ? "Earlier conversation from the date the user mentioned" : "The user's previous chat",
+        results,
+        searchFailed,
+      }),
       messages: [...thisChat, userMsg].map((m) => ({ role: m.role, content: m.content })),
-      // 1024 can be exhausted by hidden reasoning plus a few visible paragraphs, cutting
-      // answers mid-sentence. This is a ceiling, so concise answers do not cost more.
+      // A ceiling, not a target: it also has to cover any hidden reasoning. At 1024 answers
+      // were cut off mid-sentence. A typical answer is about 500 tokens.
       maxTokens: 3000,
+      // Measured on the brief's three questions (2026-11-15): with no effort set, the model
+      // reasoned privately for 6 to 8 seconds before its first word. At "low" the first word
+      // usually comes in about one second; the model still reasons first when it judges a
+      // question needs it, which took 3 to 6 seconds in 6 of 17 re-check runs. Switching
+      // reasoning off entirely was steadier (1 to 2.5 seconds) but mislabelled one comparison
+      // row in four on the hardest question, so correctness won.
+      effort: "low",
       onUsage: track(deps.main),
-    })[Symbol.asyncIterator]();
-    // Start the full answer immediately. A cheap preview races it but never delays or
-    // changes the main request; if the main model wins, no preview is shown.
-    const firstMain = mainIterator.next();
-    let first = await (async () => {
-      if (!query || !results.length) return firstMain;
-      const evidence = results.map((r, i) => `[${i + 1}] ${r.title}\n${r.snippet}`).join("\n\n");
-      const preview = deps.fast.complete({
-        system: PREVIEW_SYSTEM,
-        context: evidence,
-        messages: [{ role: "user", content: userText }],
-        maxTokens: 500,
-        effort: "low",
-        onUsage: track(deps.fast),
-      }).catch(() => "");
-      const winner = await Promise.race([
-        firstMain.then((value) => ({ kind: "main" as const, value })),
-        preview.then((text) => ({ kind: "preview" as const, text })),
-      ]);
-      if (winner.kind === "main") return winner.value;
-      if (winner.text.trim()) emit({ type: "preview", text: winner.text.trim() });
-      return firstMain;
-    })();
-    while (!first.done) {
-      const chunk = first.value;
+    });
+    for await (const chunk of stream) {
       if (!firstTokenAt) firstTokenAt = performance.now();
       answer += chunk;
       emit({ type: "token", text: chunk });
-      first = await mainIterator.next();
     }
     modelDone = performance.now();
 
     const assistantMsg: Message = {
       id: randomUUID(), role: "assistant", content: answer,
-      createdAt: new Date().toISOString(), conversationId,
+      // The injected clock plus elapsed time, never the machine clock: a test or benchmark
+      // that pins "today" to a past day then gets messages and notes dated on that day.
+      createdAt: new Date(now.getTime() + Math.round(performance.now() - started)).toISOString(),
+      conversationId,
     };
     await deps.memory.save(assistantMsg);
 
@@ -414,7 +381,6 @@ export async function runAgent(
       memoryMs: Math.round(memoryDone - started),
       routerMs: Math.round(routeDone - routeStarted),
       searchMs: Math.round(searchDone && searchStarted ? searchDone - searchStarted : 0),
-      snapshotMs: Math.round(snapshotDone && snapshotStarted ? snapshotDone - snapshotStarted : 0),
       modelStartupMs: Math.round((firstTokenAt || modelDone) - modelStarted),
       streamMs: Math.round(modelDone - (firstTokenAt || modelStarted)),
       totalMs: Math.round(performance.now() - started),
