@@ -180,7 +180,7 @@ test("durable ingestion gates noise, resolves candidates and prevents forgotten 
 });
 
 test("an interrupted ingestion job is claimed again after restart", async () => {
-  const directory = mkdtempSync(path.join(os.tmpdir(), "minime-memory-"));
+  const directory = mkdtempSync(path.join(os.tmpdir(), "memnora-memory-"));
   const file = path.join(directory, "memory.sqlite");
   const user = { id: "u", role: "user" as const, content: "Research durable queues", createdAt: "2026-11-13T10:00:00Z", conversationId: "c" };
   const assistant = { id: "a", role: "assistant" as const, content: "A durable queue persists work before processing starts.", createdAt: "2026-11-13T10:00:01Z", conversationId: "c" };

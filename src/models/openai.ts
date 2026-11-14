@@ -29,7 +29,7 @@ export function createOpenAIModel(model: string, apiKey: string): ModelAdapter {
         input: req.messages.filter((message) => message.role !== "tool"),
         max_output_tokens: req.maxTokens ?? 1024,
         stream,
-        // Memory belongs to MiniMe's SQLite store, not the provider's response store.
+        // Memory belongs to Memnora's SQLite store, not the provider's response store.
         store: false,
       }),
       signal: AbortSignal.timeout(60_000),

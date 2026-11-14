@@ -1,4 +1,4 @@
-// MiniMe chat UI. Vanilla ES module, no dependencies.
+// Memnora chat UI. Vanilla ES module, no dependencies.
 // Flow: send() -> POST /api/chat -> read SSE stream -> update the DOM per event.
 
 const $ = (id) => document.getElementById(id);
@@ -8,11 +8,15 @@ const welcomeMarkup = $("welcome").outerHTML;
 // ---------- conversation id ----------
 // The server keys memory by this id, so it must survive page reloads.
 // localStorage can throw (private mode, blocked storage), so fall back to a per-load id.
-const KEY = "minime.conversationId";
+const KEY = "memnora.conversationId";
+const LEGACY_KEY = "minime.conversationId";
 function loadId() {
   try {
-    let id = localStorage.getItem(KEY);
+    // Preserve the active conversation across the product rename.
+    let id = localStorage.getItem(KEY) || localStorage.getItem(LEGACY_KEY);
     if (!id) { id = crypto.randomUUID(); localStorage.setItem(KEY, id); }
+    else if (!localStorage.getItem(KEY)) localStorage.setItem(KEY, id);
+    localStorage.removeItem(LEGACY_KEY);
     return id;
   } catch { return crypto.randomUUID(); }
 }
@@ -31,7 +35,8 @@ document.addEventListener("keydown", (event) => { if (event.key === "Escape") se
 
 // ---------- inspectable response preferences ----------
 // Local persistence makes the UI useful before Claude wires the profile into the agent prompt.
-const PROFILE_KEY = "minime.userProfile.v1";
+const PROFILE_KEY = "memnora.userProfile.v1";
+const LEGACY_PROFILE_KEY = "minime.userProfile.v1";
 const profileDefaults = {
   answerLength: "balanced", tone: "direct", structure: "mixed",
   leadWithRecommendation: true, compareInTables: true, adaptiveLearning: false,
@@ -39,7 +44,12 @@ const profileDefaults = {
 const profileForm = $("preference-form");
 const profilePanel = $("personalize-panel");
 function loadProfile() {
-  try { return { ...profileDefaults, ...JSON.parse(localStorage.getItem(PROFILE_KEY) || "{}") }; }
+  try {
+    const stored = localStorage.getItem(PROFILE_KEY) || localStorage.getItem(LEGACY_PROFILE_KEY) || "{}";
+    if (!localStorage.getItem(PROFILE_KEY) && stored !== "{}") localStorage.setItem(PROFILE_KEY, stored);
+    localStorage.removeItem(LEGACY_PROFILE_KEY);
+    return { ...profileDefaults, ...JSON.parse(stored) };
+  }
   catch { return { ...profileDefaults }; }
 }
 function renderProfile(profile) {
@@ -70,7 +80,7 @@ profileForm.addEventListener("change", () => {
   renderProfile(profile);
 });
 $("preferences-reset").addEventListener("click", () => {
-  try { localStorage.removeItem(PROFILE_KEY); } catch {}
+  try { localStorage.removeItem(PROFILE_KEY); localStorage.removeItem(LEGACY_PROFILE_KEY); } catch {}
   renderProfile(profileDefaults);
 });
 document.addEventListener("keydown", (event) => {

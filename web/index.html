@@ -5,7 +5,8 @@
   <!-- viewport-fit + width=device-width makes the layout work at phone width -->
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="light dark" />
-  <title>MiniMe</title>
+  <meta name="description" content="Memnora searches the live web, remembers useful context, and re-checks what changed." />
+  <title>Memnora — Search live. Remember what matters.</title>
   <link rel="stylesheet" href="style.css?v=20261112-2" />
 </head>
 <body>
@@ -13,15 +14,15 @@
   <div class="app-shell">
     <aside id="sidebar" class="brand-panel" aria-label="Conversation sidebar">
       <div class="sidebar-top">
-        <a class="brand" href="/" aria-label="MiniMe home">
-          <span class="brand-mark"><i></i></span><span>MiniMe</span>
+        <a class="brand" href="/" aria-label="Memnora home">
+          <span class="brand-mark"><i></i></span><span>Memnora</span>
         </a>
         <button id="sidebar-close" class="icon-button sidebar-close" type="button" aria-label="Close conversations">
           <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg>
         </button>
       </div>
       <div class="brand-copy">
-        <p class="eyebrow">Search that remembers</p>
+        <p class="eyebrow">Search live. Remember what matters.</p>
         <h1>Research without starting over.</h1>
         <p>Fresh evidence, durable context, and a clear record of what changed.</p>
       </div>
@@ -39,7 +40,7 @@
           <button id="sidebar-toggle" class="icon-button menu-button" type="button" aria-label="Open conversations" aria-controls="sidebar" aria-expanded="false">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14M3 10h14M3 15h10"/></svg>
           </button>
-          <div class="mobile-brand"><span class="brand-mark"><i></i></span><strong>MiniMe</strong></div>
+          <div class="mobile-brand"><span class="brand-mark"><i></i></span><strong>Memnora</strong></div>
           <div class="chat-title"><span class="online-dot"></span><div><strong>Research assistant</strong><small>Web-aware · Memory on</small></div></div>
         </div>
         <div class="top-actions">
@@ -70,7 +71,7 @@
 
       <div class="composer-wrap">
         <form id="composer" autocomplete="off">
-          <textarea id="input" rows="1" placeholder="Ask MiniMe anything…" aria-label="Message"></textarea>
+          <textarea id="input" rows="1" placeholder="Ask Memnora anything…" aria-label="Message"></textarea>
           <button id="send" type="submit" aria-label="Send message">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 10 5-5 5 5M10 5v10"/></svg>
           </button>
@@ -83,12 +84,12 @@
   <button id="personalize-scrim" class="personalize-scrim" type="button" aria-label="Close personalization"></button>
   <aside id="personalize-panel" class="personalize-panel" role="dialog" aria-modal="true" aria-labelledby="personalize-title" aria-hidden="true">
     <header class="personalize-head">
-      <div><p class="panel-kicker">Your MiniMe</p><h2 id="personalize-title">Make every answer feel yours.</h2></div>
+      <div><p class="panel-kicker">Your Memnora</p><h2 id="personalize-title">Make every answer feel yours.</h2></div>
       <button id="personalize-close" class="icon-button" type="button" aria-label="Close personalization">
         <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"/></svg>
       </button>
     </header>
-    <p class="panel-intro">Choose how MiniMe communicates. These preferences change presentation—not the evidence behind an answer.</p>
+    <p class="panel-intro">Choose how Memnora communicates. These preferences change presentation—not the evidence behind an answer.</p>
     <form id="preference-form">
       <fieldset><legend>Answer depth</legend><div class="choice-row">
         <label><input type="radio" name="answerLength" value="concise"><span>Brief<small>Just the essentials</small></span></label>

@@ -1,4 +1,4 @@
-# MiniMe demo video script
+# Memnora demo video script
 
 ## Memory architecture
 
@@ -13,6 +13,6 @@ Show the following while delivering this section:
 
 ## Future direction
 
-> The measured semantic-recall gap gives the project a clear next step: hybrid document memory. MiniMe can keep fast SQLite full-text search as its first layer, add embeddings for paraphrases, and ingest cited document chunks through the same relevance, provenance, resolution, and forgetting lifecycle. That remains internal memory, so web search is still the agent's only tool.
+> The measured semantic-recall gap gives the project a clear next step: hybrid document memory. Memnora can keep fast SQLite full-text search as its first layer, add embeddings for paraphrases, and ingest cited document chunks through the same relevance, provenance, resolution, and forgetting lifecycle. That remains internal memory, so web search is still the agent's only tool.
 
 Present this as the next stage, not as functionality that is already shipped.

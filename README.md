@@ -1,12 +1,14 @@
-# MiniMe
+# Memnora
 
-MiniMe is a web-aware chat agent that remembers useful context across conversations, knows when information may have changed, and can re-check an earlier answer against fresh sources.
+Memnora is a web-aware chat agent that remembers useful context across conversations, knows when information may have changed, and can re-check an earlier answer against fresh sources.
+
+> **Search live. Remember what matters.**
 
 The project deliberately gives the agent **one tool: web search**. Memory is not another tool the model chooses to call; it is a small, deterministic context layer that runs around the agent loop. This keeps the architecture fast, testable, and easy to explain.
 
 ## What makes the memory layer different
 
-Most chat demos either paste the full transcript into every prompt or store an unstructured summary. MiniMe instead treats memory as a lifecycle:
+Most chat demos either paste the full transcript into every prompt or store an unstructured summary. Memnora instead treats memory as a lifecycle:
 
 ```text
 Completed exchange
@@ -32,7 +34,7 @@ Retrieve only a few relevant notes for the next answer
 - **Relevance gating:** greetings, low-information exchanges, and assistant failure messages are not promoted into long-term memory.
 - **Candidate resolution:** exact and near-duplicate findings are consolidated; newer preferences, decisions, and plans can supersede older ones while preserving revision history.
 - **Layered retrieval:** date resolution and date filtering run before FTS5 full-text search. Porter stemming and weak-term filtering improve lexical matching while reducing accidental recall.
-- **Volatility-aware re-checks:** changeable facts retain their original query and a structured snapshot, allowing MiniMe to search again and explain what changed.
+- **Volatility-aware re-checks:** changeable facts retain their original query and a structured snapshot, allowing Memnora to search again and explain what changed.
 - **Explicit forgetting:** memory can be inspected and forgotten by exact ID. Tombstones prevent a forgotten item from being silently recreated by a queued job.
 - **Scoped deletion:** deleting a chat removes that conversation and its derived notes without erasing unrelated history.
 - **Inspectable personalization:** answer length, tone, structure, technical depth, source display, and recommendation style are stored separately from factual memory and remain reversible.
@@ -108,7 +110,7 @@ MAIN_MODEL=gpt-6.1-sol
 SEARCH_API_KEY=
 ```
 
-For Anthropic, set `MODEL_PROVIDER=anthropic`, fill `ANTHROPIC_API_KEY`, and choose compatible Claude model IDs. Provider keys are not interchangeable because each provider has a different endpoint and protocol. If `MODEL_PROVIDER` is omitted, MiniMe uses the configured Anthropic key first, then OpenAI, then stub mode.
+For Anthropic, set `MODEL_PROVIDER=anthropic`, fill `ANTHROPIC_API_KEY`, and choose compatible Claude model IDs. Provider keys are not interchangeable because each provider has a different endpoint and protocol. If `MODEL_PROVIDER` is omitted, Memnora uses the configured Anthropic key first, then OpenAI, then stub mode.
 
 ## Verify
 
@@ -121,4 +123,4 @@ npm run bench
 
 ## Design principle
 
-MiniMe does not try to remember everything. It remembers the smallest useful, attributable representation; retrieves only what is relevant; re-checks facts that can change; and gives the user a direct way to inspect, correct, or forget what was retained.
+Memnora does not try to remember everything. It remembers the smallest useful, attributable representation; retrieves only what is relevant; re-checks facts that can change; and gives the user a direct way to inspect, correct, or forget what was retained.

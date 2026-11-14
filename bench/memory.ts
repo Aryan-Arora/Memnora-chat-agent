@@ -10,7 +10,7 @@ const notes: MemoryNote[] = [
   { id: "postgres", conversationId: "a", createdAt: "2026-11-03T09:01:00Z", topic: "Postgres hosting shortlist", claim: "Neon was cheapest at $19 monthly; Supabase was preferred for authentication.", sources: [], volatility: "volatile" },
   { id: "crm", conversationId: "b", createdAt: "2026-11-03T11:01:00Z", topic: "CRM shortlist", claim: "The shortlist was Attio, HubSpot and Pipedrive; Attio was preferred.", sources: [], volatility: "stable" },
   { id: "style", conversationId: "c", createdAt: "2026-11-04T10:01:00Z", topic: "Response style preference", claim: "Aryan prefers concise answers that lead with a recommendation and show sources.", sources: [], volatility: "stable" },
-  { id: "storage", conversationId: "d", createdAt: "2026-11-05T10:01:00Z", topic: "Memory storage decision", claim: "SQLite was selected for MiniMe because it is local, fast and easy to explain.", sources: [], volatility: "stable" },
+  { id: "storage", conversationId: "d", createdAt: "2026-11-05T10:01:00Z", topic: "Memory storage decision", claim: "SQLite was selected for Memnora because it is local, fast and easy to explain.", sources: [], volatility: "stable" },
   { id: "weather", conversationId: "e", createdAt: "2026-11-06T10:01:00Z", topic: "Indonesia weather outlook", claim: "Jakarta and Bali were hot, humid and likely to have tropical showers.", sources: [], volatility: "volatile" },
   { id: "index", conversationId: "f", createdAt: "2026-11-07T10:01:00Z", topic: "Database index trade-offs", claim: "A B-tree index avoids full table scans but makes database writes slower.", sources: [], volatility: "stable" },
 ];
