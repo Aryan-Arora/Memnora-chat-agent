@@ -368,6 +368,9 @@ export async function runAgent(
       system: opts.profile ? `${ANSWER_SYSTEM}\n\n${buildProfilePrompt(opts.profile)}` : ANSWER_SYSTEM,
       context: buildContext(now.toISOString().slice(0, 10), pastChat, retrievedNotes, results, searchFailed, changes),
       messages: [...thisChat, userMsg].map((m) => ({ role: m.role, content: m.content })),
+      // 1024 can be exhausted by hidden reasoning plus a few visible paragraphs, cutting
+      // answers mid-sentence. This is a ceiling, so concise answers do not cost more.
+      maxTokens: 3000,
       onUsage: track(deps.main),
     })[Symbol.asyncIterator]();
     // Start the full answer immediately. A cheap preview races it but never delays or
