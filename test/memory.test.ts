@@ -336,6 +336,100 @@ test("a recalled note with no saved query is still re-checked, with news since",
   memory.close();
 });
 
+test("a question that gives the day and the products itself gets the news check, with no earlier chat", async () => {
+  const memory = createSqliteMemory(":memory:"); // nothing to recall
+  const searches: { query: string; sinceDays?: number }[] = [];
+  const search: SearchTool = {
+    async search(query, opts) {
+      searches.push({ query, ...(opts?.sinceDays ? { sinceDays: opts.sinceDays } : {}) });
+      if (!opts?.sinceDays) return [{ title: "CRM prices", url: "https://example.com/prices", snippet: "Acme $10, Bolt $12" }];
+      return query === "Acme CRM news"
+        ? [{ title: "Acme ships Autopilot", url: "https://example.com/acme-new", snippet: "Acme launched Autopilot.", publishedAt: "Thu, 12 Nov 2026 09:00:00 GMT" }]
+        : [];
+    },
+  };
+  const plannerPrompts: string[] = [];
+  const filterPrompts: string[] = [];
+  const contexts: string[] = [];
+  const model: ModelAdapter = {
+    name: "named-items-test",
+    async complete(req) {
+      if (req.system.startsWith("ROUTER")) return "SEARCH: Acme CRM Bolt CRM pricing";
+      if (req.system.includes("the message itself names")) {
+        plannerPrompts.push(req.messages[0].content);
+        return "Acme CRM\nBolt CRM\nZenith CRM"; // Zenith is not in the message: the loop must drop it
+      }
+      if (req.system.startsWith("NEWS FILTER")) {
+        filterPrompts.push(req.messages[0].content);
+        return JSON.stringify({ events: [{ ns: [2], kind: "launch", happened: "2026-11-12", summary: "Acme launched Autopilot." }] });
+      }
+      return "NO";
+    },
+    async *stream(req) { contexts.push(req.context ?? ""); yield "Today's prices are listed."; },
+  };
+  const events: AgentEvent[] = [];
+  await runAgent(
+    { fast: model, main: model, search, memory, now: () => new Date("2026-11-15T10:00:00Z") },
+    "new", "On Monday we shortlisted Acme CRM and Bolt CRM. Has either changed pricing or shipped something big since?",
+    (event) => events.push(event), { timeZone: "UTC" },
+  );
+  await waitForMemoryTasks("new");
+
+  assert.deepEqual(events.filter((event) => event.type === "error"), []);
+  assert.match(plannerPrompts[0], /The message refers to 2026-11-09\./);
+  // The day starts at midnight, so the news window is 8 days; the invented name is never searched.
+  assert.deepEqual(searches, [
+    { query: "Acme CRM Bolt CRM pricing" },
+    { query: "Acme CRM news", sinceDays: 8 },
+    { query: "Bolt CRM news", sinceDays: 8 },
+  ]);
+  assert.match(filterPrompts[0], /The saved date is 2026-11-09: the user named that day in their question, and no earlier answer was saved\./);
+  assert.match(filterPrompts[0], /\[2\] searched for: Acme CRM/);
+  // The first part is told what follows and that nothing earlier is saved to compare with.
+  assert.match(contexts[0], /a section on what has happened since will be added/);
+  assert.match(contexts[0], /The user gave the day \(2026-11-09\) and the products in their message/);
+  const saved = (await memory.recent(10)).find((message) => message.role === "assistant");
+  assert.equal(
+    saved?.content,
+    "Today's prices are listed.\n\n## Since 2026-11-09\n\n- **Acme CRM** (launch, 12 Nov): Acme launched Autopilot. [2]\n- Nothing found for Bolt CRM.",
+  );
+  memory.close();
+});
+
+test("no news check when the message is not asking what happened since, or the day is today", async () => {
+  const run = async (message: string, plannerReply: string) => {
+    const memory = createSqliteMemory(":memory:");
+    const searches: { query: string; sinceDays?: number }[] = [];
+    let plannerCalls = 0;
+    const model: ModelAdapter = {
+      name: "quiet-test",
+      async complete(req) {
+        if (req.system.startsWith("ROUTER")) return "SEARCH: Acme CRM pricing";
+        if (req.system.includes("the message itself names")) { plannerCalls += 1; return plannerReply; }
+        return "NO";
+      },
+      async *stream() { yield "Answer."; },
+    };
+    await runAgent({
+      fast: model, main: model, memory, now: () => new Date("2026-11-15T10:00:00Z"),
+      search: { async search(query, opts) { searches.push({ query, ...(opts?.sinceDays ? { sinceDays: opts.sinceDays } : {}) }); return []; } },
+    }, "new", message, () => {}, { timeZone: "UTC" });
+    await waitForMemoryTasks("new");
+    const saved = (await memory.recent(10)).find((item) => item.role === "assistant");
+    memory.close();
+    return { searches, plannerCalls, answer: saved?.content ?? "" };
+  };
+  // A dated message about Acme that is not asking what happened since: the planner says NONE.
+  const notSince = await run("On Monday Acme CRM announced a feature. How does it work?", "NONE");
+  assert.equal(notSince.plannerCalls, 1);
+  assert.deepEqual(notSince.searches, [{ query: "Acme CRM pricing" }]);
+  assert.equal(notSince.answer, "Answer.");
+  // Today: nothing can have happened "since" it, so the planner is not even asked.
+  const today = await run("Has Acme CRM changed pricing since this morning, today?", "Acme CRM");
+  assert.equal(today.plannerCalls, 0);
+  assert.deepEqual(today.searches, [{ query: "Acme CRM pricing" }]);
+});
+
 test("the user's own words from the named day reach the answer model, so they can be quoted", async () => {
   const memory = createSqliteMemory(":memory:");
   await memory.save({

@@ -121,6 +121,25 @@ export const ROUTING_CASES: RoutingCase[] = [
     }],
     newsFor: ["neon", "supabase", "render"],
   },
+  // ---- the message gives the day and the products itself: no earlier chat to recall ----
+  {
+    text: "On Monday we shortlisted HubSpot, Pipedrive, Zoho CRM, Close and Salesforce for a 20-person sales team. Has any of them changed pricing or shipped something big since?",
+    want: "search", why: "names the day and the tools itself: one news search per tool",
+    newsFor: ["hubspot", "pipedrive", "zoho", "close crm", "salesforce"],
+  },
+  {
+    text: "Last Tuesday I asked you about Postgres hosting (Neon, Supabase and Render). Has any pricing changed since then?",
+    want: "search", why: "names the day and the providers itself",
+    newsFor: ["neon", "supabase", "render"],
+  },
+  {
+    text: "On 3 November the iPhone 17, 17 Pro and Air were the newest iPhones. Has Apple shipped anything big since?",
+    want: "search", why: "names the day and one product line: one news search, not one per model",
+    newsFor: ["iphone"], maxNews: 2,
+  },
+  // ... and it must stay quiet when the message is not asking what happened since.
+  { text: "On Monday HubSpot announced a new feature. How does it work?", want: "search", why: "dated, names a product, but not asking what happened since: no news", newsFor: [], maxNews: 0 },
+  { text: "What was the weather in Delhi on Monday?", want: "search", why: "dated, names no product: no news", newsFor: [], maxNews: 0 },
   // ---- should not search ----
   { text: "What is 17 * 23?", want: "no", why: "arithmetic" },
   { text: "Is 7 a prime number?", want: "no", why: "arithmetic" },

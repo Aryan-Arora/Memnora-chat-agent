@@ -70,6 +70,12 @@ test("the filter's reply is validated: unknown kinds, unseen numbers and empty s
   for (const bad of ["", "not json", '{"results":[]}', '{"events":"none"}']) assert.equal(parseNewsFilter(bad, valid), null);
 });
 
+test("the filter prompt says so when the user named the day and no earlier answer was saved", () => {
+  const prompt = buildNewsFilterPrompt({ savedOn: "2026-11-09", question: "Has any of them shipped something since?", items: [], shortDate });
+  assert.match(prompt, /The saved date is 2026-11-09: the user named that day in their question, and no earlier answer was saved\./);
+  assert.doesNotMatch(prompt, /The earlier answer was about/);
+});
+
 test("an event the filter dates before the saved day is dropped by code; unknown dates are kept", async () => {
   // Month-only dates count as the whole month. Full dates get one day of slack.
   assert.equal(happenedBefore("2026-04", "2026-11-09"), true);

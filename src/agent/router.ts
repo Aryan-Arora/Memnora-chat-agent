@@ -34,11 +34,19 @@ If you are unsure, SEARCH.
 
 Write the query the way you would type it into a search engine: short, specific and self-contained. Replace "it", "they", "the second one" and similar with the names they refer to, taken from the conversation or the memory notes. Do not add the current year or month to the query. Include a date only when the question is about one, such as yesterday's weather.`;
 
+// How a product is named for a news search, shared by both planners below so they cannot drift.
+const NAMING_RULES = `Make each name precise enough to be unambiguous: "Render Postgres", not "Render"; "Neon Postgres", not "Neon"; "Close CRM", not "Close" (a bare common word returns unrelated news).
+Models, versions or plans of one product line are a single item: write "Node.js" for Node.js 26, 24 and 22; "iPhone" for iPhone 17, 17 Pro and Air; "Windows" for Windows 10 and 11.`;
+
 export const FOLLOW_UP_SYSTEM = `FOLLOW-UP SEARCHES. An earlier answer is being re-checked. The search that produced it will be run again, to compare the saved values with today's. A news search will also run for each product or company involved, to show what has happened since the answer was saved.
 Reply with up to 5 lines and nothing else: the name of each product or company in the saved note that the user's message is about, one per line.
-Make each name precise enough to be unambiguous: "Render Postgres", not "Render"; "Neon Postgres", not "Neon"; "Close CRM", not "Close" (a bare common word returns unrelated news).
-Models, versions or plans of one product line are a single item: write "Node.js" for Node.js 26, 24 and 22; "iPhone" for iPhone 17, 17 Pro and Air; "Windows" for Windows 10 and 11.
+${NAMING_RULES}
 Reply NONE if the user's message is not about anything in the saved note, or if the note names no specific product or company.`;
+
+export const NAMED_ITEMS_SYSTEM = `FOLLOW-UP SEARCHES. The user's message refers to an earlier day and may ask what has happened since then. A news search will run for each product or company the message names, to show what has happened since that day.
+Reply with up to 5 lines and nothing else: the name of each product or company that the message itself names, one per line. Never add one the message does not mention.
+${NAMING_RULES}
+Reply NONE unless the message asks whether anything has changed, shipped, launched, been announced or become newer since that day. A message that only mentions the day, or asks how something works or what it is, is NONE. Also NONE if it names no specific product or company.`;
 
 const QUERY_REPAIR_SYSTEM = `SEARCH QUERY REPAIR. A saved memory contains a legacy web query written as conversational prose. Rewrite it as one concise, self-contained search-engine query that will find the same facts again today.
 Reply with exactly one line: QUERY: <query>.
@@ -230,6 +238,42 @@ export async function planFollowUps(
     ));
   } catch (error) {
     console.warn("[router] follow-up planning failed:", error instanceof Error ? error.message : error);
+    return [];
+  }
+}
+
+export interface NamedItemsInput {
+  userText: string;
+  /** The day the message refers to, as the user would write it: "2026-11-09". */
+  day: string;
+}
+
+/** A question can give the day and the products itself, with no earlier answer to recall:
+ *  "On Monday we shortlisted HubSpot, Pipedrive and Zoho. Has any of them shipped something
+ *  since?" The fast model names what the message names (NONE if it is not asking what has
+ *  happened since), and the loop runs the same dated news searches as for a re-check. Code
+ *  drops a name whose first word is not in the message, so the model can only name what the
+ *  user said, never guess what they meant. Returns [] on failure. */
+export async function planNamedItems(
+  fast: ModelAdapter,
+  input: NamedItemsInput,
+  onUsage?: (usage: Usage) => void,
+): Promise<string[]> {
+  try {
+    const names = parseFollowUps(await fast.complete({
+      system: NAMED_ITEMS_SYSTEM,
+      messages: [{
+        role: "user",
+        content: `The message refers to ${input.day}.\n\nUser's message:\n${input.userText}\n\nReply now with NONE or the names, one per line.`,
+      }],
+      maxTokens: 400,
+      effort: "low",
+      ...(onUsage ? { onUsage } : {}),
+    }));
+    const message = input.userText.toLowerCase();
+    return names.filter((name) => message.includes(name.split(/\s+/)[0].toLowerCase()));
+  } catch (error) {
+    console.warn("[router] named-item planning failed:", error instanceof Error ? error.message : error);
     return [];
   }
 }

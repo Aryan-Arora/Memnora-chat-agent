@@ -24,7 +24,7 @@ import type {
   SearchResult, SearchTool, Usage, UserProfile,
 } from "../types.js";
 import { filterNews, numberNews, renderSince, searchNewsSince, type NewsItem, type NewsSearch } from "./news.js";
-import { planFollowUps, route } from "./router.js";
+import { planFollowUps, planNamedItems, route } from "./router.js";
 
 export type AgentEvent =
   | { type: "status"; text: string }
@@ -129,8 +129,10 @@ function buildContext(input: {
   searchFailed: boolean;
   /** True when news searches are running and a "Since" section will follow this answer. */
   newsFollows: boolean;
+  /** Set when the user named the day and the products themselves and no earlier answer is saved. */
+  namedDay: string | null;
 }): string {
-  const { today, stamp, notes, recheck, askedThen, pastChat, pastChatLabel, results, searchFailed, newsFollows } = input;
+  const { today, stamp, notes, recheck, askedThen, pastChat, pastChatLabel, results, searchFailed, newsFollows, namedDay } = input;
   const parts = [`Today is ${today} (the user's local date).`];
   if (notes.length) {
     parts.push(
@@ -171,6 +173,13 @@ function buildContext(input: {
     parts.push(
       "News searches for each item are running separately, and a section on what has happened since will be added " +
         "after your answer. Leave news, launches and releases to that section: do not discuss them and do not say you could not check them.",
+    );
+  }
+  if (namedDay) {
+    parts.push(
+      `The user gave the day (${namedDay}) and the products in their message, so use that as the starting point. No earlier prices are saved, ` +
+        `so you cannot tell from today's pages alone whether a price changed since then: give today's published prices, say that nothing earlier is saved to compare them with, ` +
+        `and say that the section after your answer covers announced changes.`,
     );
   }
   return parts.join("\n\n");
@@ -361,7 +370,14 @@ export async function runAgent(
     let searchFailed = false;
     let followUpNames: string[] = [];
     let news: Promise<NewsSearch[]> = Promise.resolve([]);
-    const savedOn = decision.recheckNote ? clock.stamp(decision.recheckNote.createdAt).slice(0, 10) : "";
+    // No earlier answer to re-check, but the message may give the day and the products itself:
+    // "On Monday we shortlisted HubSpot, Pipedrive and Zoho. Has any of them shipped something
+    // since?" The news-since check needs only a start day and names, so it can run from the
+    // message alone. Today is excluded: nothing can have happened "since" it yet.
+    const namedDay = !decision.recheckNote && range && range.label !== "today" ? range : null;
+    const savedOn = decision.recheckNote
+      ? clock.stamp(decision.recheckNote.createdAt).slice(0, 10)
+      : namedDay ? clock.stamp(namedDay.from).slice(0, 10) : "";
     if (query) {
       searchStarted = performance.now();
       emit({ type: "status", text: `Searching: ${query}` });
@@ -375,6 +391,10 @@ export async function runAgent(
         const note = decision.recheckNote;
         const plan = planFollowUps(deps.fast, { userText, note, savedOn }, track(deps.fast));
         news = plan.then((names) => searchNewsSince(deps.search, names, new Date(note.createdAt), now));
+        followUpNames = await plan;
+      } else if (namedDay) {
+        const plan = planNamedItems(deps.fast, { userText, day: savedOn }, track(deps.fast));
+        news = plan.then((names) => searchNewsSince(deps.search, names, new Date(namedDay.from), now));
         followUpNames = await plan;
       }
       try {
@@ -398,14 +418,13 @@ export async function runAgent(
 
     // The "Since" section is built while the first part streams: the news searches are already
     // running, and filtering their results needs nothing from the first part.
-    const recheckNote = decision.recheckNote;
     const primaryResults = results;
-    const since = recheckNote && followUpNames.length
+    const since = followUpNames.length
       ? news.then(async (searches) => {
           const items = numberNews(searches, primaryResults.length + 1, primaryResults.map((r) => r.url));
           const events = await filterNews(
             deps.fast,
-            { topic: recheckNote.topic, savedOn, question: userText, items, shortDate: clock.shortDate },
+            { topic: decision.recheckNote?.topic, savedOn, question: userText, items, shortDate: clock.shortDate },
             track(deps.fast),
           );
           return { items, text: renderSince({ savedOn, searches, items, events, shortDate: clock.shortDate }) };
@@ -438,6 +457,7 @@ export async function runAgent(
         results,
         searchFailed,
         newsFollows: followUpNames.length > 0,
+        namedDay: namedDay && followUpNames.length ? savedOn : null,
       }),
       messages,
       // A ceiling, not a target: it also has to cover any hidden reasoning. At 1024 answers

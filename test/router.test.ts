@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { needsQueryRepair, parseFollowUps, pickRecheckNote, planFollowUps, route, routerInput, type RouteInput } from "../src/agent/router.js";
+import { needsQueryRepair, parseFollowUps, pickRecheckNote, planFollowUps, planNamedItems, route, routerInput, type RouteInput } from "../src/agent/router.js";
 import type { MemoryNote, ModelAdapter } from "../src/types.js";
 
 /** A fast model that always gives the same reply (or always fails), and counts its calls. */
@@ -141,6 +141,25 @@ test("a failed follow-up plan means no follow-ups, not an error", async () => {
   const input = { userText: "Has anything shipped since?", note: note(), savedOn: "2026-11-09" };
   assert.deepEqual(await planFollowUps(fakeFast(new Error("network down")).model, input), []);
   assert.deepEqual(await planFollowUps(fakeFast("HubSpot\nPipedrive").model, input), ["HubSpot", "Pipedrive"]);
+});
+
+test("the planner for a message that names the products itself only returns names the message contains", async () => {
+  const asked = "On Monday we shortlisted Acme CRM and Bolt. Has either shipped something since?";
+  const input = { userText: asked, day: "2026-11-09" };
+  // The model may only name what the user said: a product it added from its own knowledge is dropped.
+  assert.deepEqual(await planNamedItems(fakeFast("Acme CRM\nBolt\nZenith CRM\nHubSpot").model, input), ["Acme CRM", "Bolt"]);
+  // Matching is on the first word, case-insensitively, so a more precise name still counts.
+  assert.deepEqual(await planNamedItems(fakeFast("ACME CRM Pro\nBolt CRM").model, input), ["ACME CRM Pro", "Bolt CRM"]);
+  assert.deepEqual(await planNamedItems(fakeFast("NONE").model, input), []);
+  assert.deepEqual(await planNamedItems(fakeFast("I would search for both of them.").model, input), []);
+  assert.deepEqual(await planNamedItems(fakeFast(new Error("network down")).model, input), []);
+  // The model is given the day and the message.
+  let sent = "";
+  const spy: ModelAdapter = { name: "spy", async complete(req) { sent = req.system + "\n" + req.messages[0].content; return "NONE"; }, async *stream() {} };
+  await planNamedItems(spy, input);
+  assert.match(sent, /^FOLLOW-UP SEARCHES\./);
+  assert.match(sent, /The message refers to 2026-11-09\./);
+  assert.match(sent, /On Monday we shortlisted Acme CRM and Bolt\./);
 });
 
 test("the router sees today's date, recalled notes and recent turns", () => {

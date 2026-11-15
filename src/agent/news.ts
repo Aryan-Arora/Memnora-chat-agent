@@ -93,8 +93,9 @@ If several results report the same event, list it once with every result number 
 If no result reports an event, reply {"events":[]}.`;
 
 export interface NewsFilterInput {
-  /** What the earlier answer was about, from its note. */
-  topic: string;
+  /** What the earlier answer was about, from its note. Absent when the user named the day and
+   *  the products themselves and no earlier answer was saved. */
+  topic?: string;
   savedOn: string;
   question: string;
   items: NewsItem[];
@@ -109,7 +110,9 @@ export function buildNewsFilterPrompt(input: NewsFilterInput): string {
     return `[${n}] searched for: ${name} | ${host} | published ${input.shortDate(result.publishedAt ?? "")}\n${result.title}\n${text}`;
   });
   return [
-    `The earlier answer was about "${input.topic}" and was saved on ${input.savedOn}.`,
+    input.topic
+      ? `The earlier answer was about "${input.topic}" and was saved on ${input.savedOn}.`
+      : `The saved date is ${input.savedOn}: the user named that day in their question, and no earlier answer was saved.`,
     `The user's question: ${input.question}`,
     `News results:\n\n${results.join("\n\n")}`,
     "Reply now with the JSON only.",
