@@ -224,9 +224,9 @@ export async function planFollowUps(
     // A short classifier occasionally replies NONE even when the note visibly names products.
     // Retry once with the contradiction made explicit; the normal path still costs one call.
     return parseFollowUps(await ask(
-      `${base}\n\nYour first reply named nothing. Re-read the saved topic and claim. ` +
-      `If they name any product, company or product line, list those names now, one per line. ` +
-      `Reply NONE only when there truly is no named item.`,
+      `${base}\n\nYour first reply named nothing. Re-read the saved topic and claim, and the user's message. ` +
+      `If the message asks about any product, company or product line that the note names, list those names now, one per line. ` +
+      `Reply NONE if it does not.`,
     ));
   } catch (error) {
     console.warn("[router] follow-up planning failed:", error instanceof Error ? error.message : error);
