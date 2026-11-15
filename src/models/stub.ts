@@ -14,11 +14,19 @@ export function createStubModel(name = "stub"): ModelAdapter {
       outputTokens: 40,
       cacheReadTokens: 0,
     });
+    // Keyless mode plans no follow-up searches for a re-check.
+    if (req.system.startsWith("FOLLOW-UP")) return "NONE";
+    // A useful deterministic repair in keyless mode: the note topic is already a compact,
+    // attributable description and is safer than preserving the user's whole sentence.
+    if (req.system.startsWith("SEARCH QUERY REPAIR")) {
+      const topic = last.match(/^Memory topic:\s*(.+)$/m)?.[1]?.trim();
+      return topic ? `QUERY: ${topic}` : "";
+    }
     // Router prompt asks for "SEARCH: <query>" or "NO". Cheap keyword heuristic here.
     if (req.system.includes("ROUTER")) {
       // The router input wraps the user's text; pull out just the latest message.
       const latest = last.match(/Latest user message:\n([\s\S]*?)\n\nReply now/)?.[1] ?? last;
-      return /price|pricing|latest|news|changed|since|today|current/i.test(latest)
+      return /price|pricing|latest|news|changed|since|today|current|version|release|feature|enable|available|support/i.test(latest)
         ? `SEARCH: ${latest.slice(0, 120)}`
         : "NO";
     }

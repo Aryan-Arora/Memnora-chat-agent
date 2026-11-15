@@ -13,6 +13,10 @@ export interface RoutingCase {
   /** Notes already in memory. One with a `query` came from an answer that searched. */
   notes?: Pick<MemoryNote, "createdAt" | "topic" | "claim" | "query">[];
   mustMention?: RegExp;
+  /** For a re-check: names that the news follow-up searches must cover, one search naming each. */
+  newsFor?: string[];
+  /** For a re-check: the most news searches that make sense. */
+  maxNews?: number;
 }
 
 const crmTurns: RoutingCase["turns"] = [
@@ -62,8 +66,39 @@ export const ROUTING_CASES: RoutingCase[] = [
   { text: "I asked about Node.js LTS on 3 November. Is there a newer LTS line yet?", want: "search", why: "re-check of a note that has no saved query", notes: nodeNote, mustMention: /node/i },
   {
     text: "A shortlist of 5 CRM tools was made on Monday: has any changed pricing or shipped something big since?",
-    want: "search", why: "re-check that reuses the saved query",
+    want: "search", why: "re-check that reuses the saved query, plus news for each tool",
     notes: [{ ...crmNote[0], query: "CRM tools starting prices small team" }], mustMention: /^CRM tools starting prices small team$/,
+    newsFor: ["freshsales", "zoho", "pipedrive", "hubspot", "salesforce"],
+  },
+  {
+    text: "A shortlist of 5 CRM tools was made on Monday: are those prices still right?",
+    want: "search", why: "legacy conversational query is repaired before it reaches search",
+    notes: [{
+      ...crmNote[0],
+      query: "I shortlisted five CRM tools on Monday; have any of their prices changed since then? Please cite sources.",
+    }],
+    mustMention: /crm|hubspot|pipedrive|zoho|freshsales|salesforce/i,
+  },
+  {
+    text: "You shortlisted CRM tools on Monday. Has HubSpot shipped anything new since then?",
+    want: "search", why: "re-check about one tool: news for that tool only",
+    notes: [{ ...crmNote[0], query: "CRM tools starting prices small team" }], newsFor: ["hubspot"], maxNews: 2,
+  },
+  {
+    text: "What did I ask you on 3 November, and is your answer still correct today?",
+    want: "search", why: "re-check of one product: one news search, not one per version",
+    notes: [{ ...nodeNote[0], claim: "Node.js 26 is the current LTS (end of life 30 April 2029). Node.js 24 and 22 are in Maintenance.", query: "current Node.js LTS version end of support date" }],
+    mustMention: /^current Node\.js LTS version end of support date$/, newsFor: ["node"], maxNews: 2,
+  },
+  {
+    text: "I asked about Postgres hosting last Tuesday: has any pricing changed since then?",
+    want: "search", why: "re-check of prices: news for each provider",
+    notes: [{
+      createdAt: "2026-11-10T10:00:30.000Z", topic: "Managed Postgres pricing: Neon vs Supabase vs Render",
+      claim: "Neon $0.106 per CU-hour, Supabase Pro $25 a month, Render Postgres from $6 a month.",
+      query: "Neon vs Supabase vs Render managed Postgres pricing",
+    }],
+    newsFor: ["neon", "supabase", "render"],
   },
   // ---- should not search ----
   { text: "What is 17 * 23?", want: "no", why: "arithmetic" },

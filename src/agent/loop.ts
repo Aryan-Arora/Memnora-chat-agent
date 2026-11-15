@@ -5,6 +5,8 @@
 //   3. Search, if the route asked for it. If the search fails, answer anyway and say so.
 //   4. The main model writes the answer, streamed. Stable instructions go in `system`
 //      (cacheable); everything that changes per question goes in `context`.
+//      A re-check that also asks what has happened since gets a second part: news searches,
+//      one per item, run while the first part is written, and their findings are appended.
 //   5. After the answer, a background job turns the exchange into a dated note.
 // Events are emitted as they happen so the UI can show progress.
 import { randomUUID } from "node:crypto";
@@ -21,7 +23,7 @@ import type {
   MemoryIngestionSource, MemoryNote, MemoryStore, Message, ModelAdapter, NoteMemoryStore, RecheckEntry,
   SearchResult, SearchTool, Usage, UserProfile,
 } from "../types.js";
-import { route } from "./router.js";
+import { planFollowUps, route } from "./router.js";
 
 export type AgentEvent =
   | { type: "status"; text: string }
@@ -65,11 +67,21 @@ Keep paragraphs short and put caveats beside the claim they qualify instead of i
 When earlier conversation is provided, use its timestamps to answer questions about what was asked and when.
 When asked whether an earlier answer still holds, or what has changed since it, work in this order, even if the preferences below say to lead with the conclusion:
 1. One sentence saying what was asked or saved, and on which date.
-2. The comparison, one saved value at a time: what it was then, what today's web results say now, and a status of unchanged, changed, or not confirmed. Use a table for three or more values. "Not confirmed" means today's results do not state the value; it is never a change.
+2. The comparison, one saved value at a time: what it was then, what today's web results say now, and a status of unchanged, changed, or not confirmed. Use a table for three or more values. "Changed" means today's value differs from the saved one; sources that disagree while the value stays the same leave it "unchanged". "Not confirmed" means today's results do not state the value; it is never a change.
 3. The verdict, in one or two sentences, after the comparison.
 Cite web results as [n]. If sources conflict, say so and give more weight to the most recently dated one. If the question assumes something that does not exist, say that.
 If the question is vague, ask one clarifying question instead of guessing.
 If a search failed or returned nothing, say you could not check the web instead of guessing.`;
+
+// The second part of a re-check answer, written only when the user also asked what has
+// happened since. It is a separate call so the comparison does not wait for the news searches.
+const NEWS_SYSTEM = `You are adding one section to an answer that is already on the user's screen. The user asked what has happened since an earlier answer. The first part compared the saved values with today's. News searches then ran, one per item, limited to the period since the saved date.
+Write only the new section. Start with a "## Since <saved date>" heading, then:
+- A result counts only if it reports something the item's maker announced, released or changed on or after the saved date. Reviews, comparisons, interviews, share-price coverage and anything about another company do not count. Never describe a result that does not count, and do not explain why it was left out.
+- For each item with a result that counts: one bullet naming the item, what happened, its date and a citation [n].
+- Name the items with nothing that counts together, in one last bullet: "Nothing found for X, Y and Z." If a search failed, say that item could not be checked.
+- End with one sentence that answers the user's question about what has happened since, consistent with the first part.
+Do not guess, do not repeat the comparison, and do not add other headings.`;
 
 // Dates shown to the model are the user's local calendar dates, so "on 3 November" in the
 // question and the date printed on a note mean the same day wherever the user is.
@@ -100,9 +112,10 @@ function localClock(timeZone?: string) {
 }
 
 // The date a snapshot was taken is printed above it. Some snapshots also store that date as
-// a value ("as_of", "observed_on"). Shown to the answer model it reads as a saved fact, and
-// it was reported to the user as something that changed.
-const BOOKKEEPING_KEY = /^(as_of|observed_on|checked_on|recorded_on|retrieved_on|snapshot_date|date)$/;
+// a value ("as_of", "observed_on", "exchange_date": the name varies). Shown to the answer
+// model it reads as a saved fact, and it was reported to the user as something that changed.
+// So a value is dropped when its key looks like a date stamp and it is the snapshot's own day.
+const DATE_STAMP_KEY = /date|as_of|_on$|_at$|observed|checked|snapshot/;
 
 function buildContext(input: {
   today: string;
@@ -114,8 +127,10 @@ function buildContext(input: {
   pastChatLabel: string;
   results: SearchResult[];
   searchFailed: boolean;
+  /** True when news searches are running and a second part will follow this answer. */
+  newsFollows: boolean;
 }): string {
-  const { today, stamp, notes, recheck, pastChat, pastChatLabel, results, searchFailed } = input;
+  const { today, stamp, notes, recheck, pastChat, pastChatLabel, results, searchFailed, newsFollows } = input;
   const parts = [`Today is ${today} (the user's local date).`];
   if (notes.length) {
     parts.push(
@@ -123,8 +138,10 @@ function buildContext(input: {
         notes.map((note) => `[${stamp(note.createdAt)}] ${note.topic}: ${note.claim}`).join("\n"),
     );
   }
+  const savedDays = recheck ? [recheck.saved.createdAt.slice(0, 10), stamp(recheck.saved.createdAt).slice(0, 10)] : [];
   const savedValues = Object.fromEntries(
-    Object.entries(recheck?.saved.snapshot ?? {}).filter(([key]) => !BOOKKEEPING_KEY.test(key)),
+    Object.entries(recheck?.saved.snapshot ?? {})
+      .filter(([key, value]) => !(DATE_STAMP_KEY.test(key) && typeof value === "string" && savedDays.includes(value.slice(0, 10)))),
   );
   if (recheck && Object.keys(savedValues).length) {
     parts.push(
@@ -144,8 +161,63 @@ function buildContext(input: {
     );
   }
   if (searchFailed) parts.push("The web search failed. Tell the user you could not check the web.");
+  if (newsFollows) {
+    parts.push(
+      "News searches for each item are running separately, and a section on what has happened since will be added " +
+        "after your answer. Leave news, launches and releases to that section: do not discuss them and do not say you could not check them.",
+    );
+  }
   return parts.join("\n\n");
 }
+
+interface FollowUp { query: string; results: SearchResult[]; failed: boolean }
+
+/** News searches for a re-check, run in parallel. Only results dated on or after the saved
+ *  answer are kept. That filter is code, not a prompt: an undated or older page can then
+ *  never be presented as something new. */
+async function searchNewsSince(search: SearchTool, queries: string[], savedAt: Date, now: Date): Promise<FollowUp[]> {
+  const day = 86_400_000;
+  const sinceDays = Math.max(1, Math.ceil((now.getTime() - savedAt.getTime()) / day) + 1);
+  const cutoff = savedAt.getTime() - day; // one day of slack: publication dates carry no time zone
+  return Promise.all(queries.map(async (query) => {
+    try {
+      const found = await search.search(query, { maxResults: 3, sinceDays });
+      return { query, failed: false, results: found.filter((r) => r.publishedAt && Date.parse(r.publishedAt) >= cutoff) };
+    } catch (error) {
+      console.error("[search] follow-up failed:", error instanceof Error ? error.message : error);
+      return { query, failed: true, results: [] };
+    }
+  }));
+}
+
+function buildNewsContext(input: {
+  today: string;
+  stamp: (iso: string) => string;
+  note: MemoryNote;
+  savedOn: string;
+  firstPart: string;
+  followUps: FollowUp[];
+  /** Citation number of the first news result: numbering continues from the first part. */
+  firstNumber: number;
+}): string {
+  let number = input.firstNumber;
+  const searches = input.followUps.map((followUp) => {
+    if (followUp.failed) return `Search "${followUp.query}": the search failed, so this item could not be checked.`;
+    if (!followUp.results.length) return `Search "${followUp.query}": nothing dated since ${input.savedOn}.`;
+    return `Search "${followUp.query}":\n` + followUp.results
+      .map((r) => `[${number++}] ${r.title} (${r.url}) published ${input.stamp(r.publishedAt ?? "").slice(0, 10)}\n${r.content ?? r.snippet}`)
+      .join("\n\n");
+  });
+  return [
+    `Today is ${input.today} (the user's local date).`,
+    `The earlier answer was saved on ${input.savedOn}. ${input.note.topic}: ${input.note.claim}`,
+    `First part of the answer, already shown to the user:\n${input.firstPart}`,
+    `News searches limited to the period since ${input.savedOn}:\n${searches.join("\n\n")}`,
+  ].join("\n\n");
+}
+
+const toSources = (results: SearchResult[]) =>
+  results.map((r) => ({ title: r.title, url: r.url, ...(r.publishedAt ? { publishedAt: r.publishedAt } : {}) }));
 
 function noteStore(memory: MemoryStore): NoteMemoryStore | null {
   const candidate = memory as Partial<NoteMemoryStore>;
@@ -160,6 +232,9 @@ function noteStore(memory: MemoryStore): NoteMemoryStore | null {
 // Bare "earlier", "previous", "before" and "still" are deliberately absent: they describe
 // ordinary questions too ("the previous iPhone") and used to switch the web search off.
 const SAID_BEFORE = /\b(?:i|we|you)\s+(?:asked|said|told|talked|discussed|decided|mentioned|recommended|suggested|shortlisted)\b|\bdid\s+(?:i|we|you)\s+(?:ask|say|tell|talk|discuss|decide|mention|recommend|suggest)\b|\b(?:remember|recall|last time|re-?check|changed since)\b/i;
+// In “is the earlier answer still correct today?”, today describes the fresh comparison,
+// not the day to retrieve. “What did I ask today?” has no freshness wording and keeps its range.
+const TODAY_IS_FRESHNESS = /(?:\b(?:still|correct|right|changed?|current|verify|re-?check|up to date)\b[^.?!]*\btoday\b|\btoday\b[^.?!]*\b(?:still|correct|right|changed?|current|verify|re-?check|up to date)\b)/i;
 // "my previous chat", "the other conversation": a different chat from this one. A bare
 // "conversation" or "summarize" is not enough ("how do I start a conversation?").
 const OTHER_CHAT = /\b(?:previous|last|other|earlier|past|another|prior)\s+(?:chat|conversation|session|discussion|thread)s?\b/i;
@@ -235,8 +310,11 @@ export async function runAgent(
   const track = (m: ModelAdapter) => (u: Usage) => deps.onUsage?.(m.name, u);
   try {
     const compact = noteStore(deps.memory);
-    const range = resolveDate(userText, now, opts.timeZone);
     const saidBefore = SAID_BEFORE.test(userText);
+    const resolvedRange = resolveDate(userText, now, opts.timeZone);
+    const range = saidBefore && resolvedRange?.label === "today" && TODAY_IS_FRESHNESS.test(userText)
+      ? null
+      : resolvedRange;
     const otherChat = OTHER_CHAT.test(userText);
     const shouldRecall = Boolean(range || saidBefore || otherChat);
     // Recall must see notes whose extraction has only just finished: this chat's, or every
@@ -292,6 +370,12 @@ export async function runAgent(
       recentTurns: thisChat.slice(-4),
       notes: retrievedNotes,
     }, track(deps.fast));
+    // Legacy notes sometimes saved the user's whole sentence as their query. The router
+    // repairs those lazily; persist the result so that cost is paid only on the first re-check.
+    if (compact && decision.recheckNote?.query && decision.query !== decision.recheckNote.query) {
+      decision.recheckNote.query = decision.query;
+      await compact.saveNote(decision.recheckNote);
+    }
     routeDone = performance.now();
     const { query } = decision;
     console.log(`[router] ${JSON.stringify(userText.slice(0, 60))} -> ${query ? `SEARCH ${JSON.stringify(query)}` : "NO"} (${decision.source})`);
@@ -305,17 +389,30 @@ export async function runAgent(
 
     let results: SearchResult[] = [];
     let searchFailed = false;
+    let followUpQueries: string[] = [];
+    let news: Promise<FollowUp[]> = Promise.resolve([]);
+    const savedOn = decision.recheckNote ? clock.stamp(decision.recheckNote.createdAt).slice(0, 10) : "";
     if (query) {
       searchStarted = performance.now();
       emit({ type: "status", text: `Searching: ${query}` });
+      const primary = deps.search.search(query, { maxResults: 5 });
+      primary.catch(() => {}); // the failure is handled at the await below; this only keeps it from being reported as unhandled first
+      if (decision.recheckNote) {
+        // The saved query cannot show what has happened since ("...or shipped something big
+        // since?"). While it runs again, the fast model names the products the question is
+        // about, and a dated news search starts for each. Those searches keep running while
+        // the first part of the answer is written. "<name> news" was the wording that
+        // returned relevant items for every product tried; narrower ones ("pricing change",
+        // "product launch") missed some.
+        const note = decision.recheckNote;
+        const plan = planFollowUps(deps.fast, { userText, note, savedOn }, track(deps.fast))
+          .then((names) => names.map((name) => `${name} news`));
+        news = plan.then((queries) => searchNewsSince(deps.search, queries, new Date(note.createdAt), now));
+        followUpQueries = await plan;
+      }
       try {
-        results = await deps.search.search(query, { maxResults: 5 });
-        emit({
-          type: "sources",
-          sources: results.map((r) => ({
-            title: r.title, url: r.url, ...(r.publishedAt ? { publishedAt: r.publishedAt } : {}),
-          })),
-        });
+        results = await primary;
+        emit({ type: "sources", sources: toSources(results) });
       } catch (err) {
         searchFailed = true; // degrade gracefully: the answer prompt tells the model to say so
         console.error("[search] failed:", err instanceof Error ? err.message : err);
@@ -334,10 +431,12 @@ export async function runAgent(
 
     let answer = "";
     modelStarted = performance.now();
+    // Preferences change rarely, so they sit in the cached system block, not the per-question
+    // context: a changed setting costs one cache miss, then it is cached again.
+    const withProfile = (system: string) => opts.profile ? `${system}\n\n${buildProfilePrompt(opts.profile)}` : system;
+    const messages = [...thisChat, userMsg].map((m) => ({ role: m.role, content: m.content }));
     const stream = deps.main.stream({
-      // Preferences change rarely, so they sit in the cached system block, not the per-question
-      // context: a changed setting costs one cache miss, then it is cached again.
-      system: opts.profile ? `${ANSWER_SYSTEM}\n\n${buildProfilePrompt(opts.profile)}` : ANSWER_SYSTEM,
+      system: withProfile(ANSWER_SYSTEM),
       context: buildContext({
         today: clock.today(now),
         stamp: clock.stamp,
@@ -347,8 +446,9 @@ export async function runAgent(
         pastChatLabel: range ? "Earlier conversation from the date the user mentioned" : "The user's previous chat",
         results,
         searchFailed,
+        newsFollows: followUpQueries.length > 0,
       }),
-      messages: [...thisChat, userMsg].map((m) => ({ role: m.role, content: m.content })),
+      messages,
       // A ceiling, not a target: it also has to cover any hidden reasoning. At 1024 answers
       // were cut off mid-sentence. A typical answer is about 500 tokens.
       maxTokens: 3000,
@@ -365,6 +465,43 @@ export async function runAgent(
       if (!firstTokenAt) firstTokenAt = performance.now();
       answer += chunk;
       emit({ type: "token", text: chunk });
+    }
+
+    // Second part of a re-check: what has happened since. The news searches have usually
+    // finished by now, because they ran while the first part was being written.
+    if (decision.recheckNote && followUpQueries.length) {
+      const seen = new Set(results.map((r) => r.url));
+      const followUps = (await news).map((followUp) => ({
+        ...followUp,
+        results: followUp.results.filter((r) => {
+          if (seen.has(r.url)) return false;
+          seen.add(r.url);
+          return true;
+        }),
+      }));
+      const newsResults = followUps.flatMap((followUp) => followUp.results);
+      emit({ type: "status", text: `Adding what has happened since ${savedOn}` });
+      // One numbered list across both parts, so a citation [n] means the same source everywhere.
+      emit({ type: "sources", sources: toSources([...results, ...newsResults]) });
+      const firstPart = answer;
+      answer += "\n\n";
+      emit({ type: "token", text: "\n\n" });
+      const secondPart = deps.main.stream({
+        system: withProfile(NEWS_SYSTEM),
+        context: buildNewsContext({
+          today: clock.today(now), stamp: clock.stamp, note: decision.recheckNote, savedOn,
+          firstPart, followUps, firstNumber: results.length + 1,
+        }),
+        messages,
+        maxTokens: 1500,
+        effort: "low",
+        onUsage: track(deps.main),
+      });
+      for await (const chunk of secondPart) {
+        answer += chunk;
+        emit({ type: "token", text: chunk });
+      }
+      results = [...results, ...newsResults]; // the saved note records every source used
     }
     modelDone = performance.now();
 

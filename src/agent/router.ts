@@ -34,6 +34,16 @@ If you are unsure, SEARCH.
 
 Write the query the way you would type it into a search engine: short, specific and self-contained. Replace "it", "they", "the second one" and similar with the names they refer to, taken from the conversation or the memory notes. Do not add the current year or month to the query. Include a date only when the question is about one, such as yesterday's weather.`;
 
+export const FOLLOW_UP_SYSTEM = `FOLLOW-UP SEARCHES. An earlier answer is being re-checked. The search that produced it will be run again, to compare the saved values with today's. A news search will also run for each product or company involved, to show what has happened since the answer was saved.
+Reply with up to 5 lines and nothing else: the name of each product or company in the saved note that the user's message is about, one per line.
+Make each name precise enough to be unambiguous: "Render Postgres", not "Render"; "Neon Postgres", not "Neon".
+Versions or plans of one product are a single item: for Node.js 26, 24 and 22 write one line, "Node.js".
+Reply NONE only if the saved note names no specific product or company.`;
+
+const QUERY_REPAIR_SYSTEM = `SEARCH QUERY REPAIR. A saved memory contains a legacy web query written as conversational prose. Rewrite it as one concise, self-contained search-engine query that will find the same facts again today.
+Reply with exactly one line: QUERY: <query>.
+Keep product names and the fact being checked. Remove first-person wording, chat references, dates that only describe when the conversation happened, and requests such as "cite sources". Do not answer the question.`;
+
 // The user wants today's state of something, not only what was said: "still", "changed", "now".
 const WANTS_FRESH = /\b(re-?check|verify|changed?|changes|still|now|current|currently|latest|today|since|updated?|up to date)\b/i;
 // A message that is only a greeting or thanks. "Hi, what does X cost?" must not match.
@@ -56,6 +66,42 @@ export interface Route {
   source: "stored query" | "greeting rule" | "model" | "model fallback";
   /** Set when an earlier answer is being re-checked: the note whose saved query is reused. */
   recheckNote?: MemoryNote;
+}
+
+/** New notes contain short router-written queries. Older notes may contain the user's whole
+ * sentence. Repair only unmistakable legacy prose so a good hand-written query is untouched. */
+export function needsQueryRepair(query: string): boolean {
+  const words = query.trim().split(/\s+/).filter(Boolean);
+  return query.length > 120 || words.length > 12 || /[?\n]/.test(query) ||
+    /\b(i|we|you)\s+(?:asked|discussed|shortlisted|compared|said|told)\b/i.test(query) ||
+    /^\s*(?:what|which|who|when|where|why|how|is|are|was|were|has|have|did|do|does|can|could|would|should)\b/i.test(query);
+}
+
+async function repairStoredQuery(
+  fast: ModelAdapter,
+  note: MemoryNote,
+  userText: string,
+  onUsage?: (usage: Usage) => void,
+): Promise<string> {
+  if (!note.query || !needsQueryRepair(note.query)) return note.query ?? "";
+  try {
+    const reply = (await fast.complete({
+      system: QUERY_REPAIR_SYSTEM,
+      messages: [{
+        role: "user",
+        content: `Memory topic: ${note.topic}\nSaved claim: ${note.claim.slice(0, 600)}\nLegacy query: ${note.query}\nCurrent re-check request: ${userText}`,
+      }],
+      maxTokens: 300,
+      effort: "low",
+      ...(onUsage ? { onUsage } : {}),
+    })).trim();
+    const repaired = reply.match(/^QUERY:\s*(.+)$/i)?.[1]
+      ?.trim().replace(/^["'`]+|["'`]+$/g, "");
+    return repaired && repaired.length <= 200 && !/[?\n]/.test(repaired) ? repaired : note.query;
+  } catch (error) {
+    console.warn("[router] saved query repair failed:", error instanceof Error ? error.message : error);
+    return note.query;
+  }
 }
 
 /** Everything the fast model sees, as one message. Kept as one message, not real chat turns:
@@ -87,7 +133,10 @@ export async function route(
   const recheckNote = WANTS_FRESH.test(input.userText)
     ? input.notes.find((note) => note.volatility === "volatile" && note.query) ?? input.notes.find((note) => note.query)
     : undefined;
-  if (recheckNote?.query) return { query: recheckNote.query, source: "stored query", recheckNote };
+  if (recheckNote?.query) {
+    const query = await repairStoredQuery(fast, recheckNote, input.userText, onUsage);
+    return { query, source: "stored query", recheckNote };
+  }
 
   // Rule 2: a message that is only a greeting has nothing to look up.
   if (GREETING.test(input.userText)) return { query: "", source: "greeting rule" };
@@ -112,4 +161,54 @@ export async function route(
   if (/^NO\b/i.test(reply)) return { query: "", source: "model" };
   // Fail toward searching: an empty, unreadable or failed reply must never mean "skip the web".
   return { query: input.userText.slice(0, 200), source: "model fallback" };
+}
+
+export interface FollowUpInput {
+  userText: string;
+  /** The note being re-checked. */
+  note: Pick<MemoryNote, "topic" | "claim">;
+  /** The day that note was saved, as the user would write it: "2026-11-09". */
+  savedOn: string;
+}
+
+/** Turns the fast model's reply into at most five item names. Anything that is not a short
+ *  name (prose, JSON, a "SEARCH:" line) is a reply we did not ask for and is dropped. */
+export function parseFollowUps(reply: string): string[] {
+  const lines = reply.split("\n")
+    .map((line) => line.trim().replace(/^(?:[-*•]|\d+[.)])\s*/, "").replace(/^["'`]+|["'`]+$/g, "").trim())
+    .filter(Boolean);
+  if (!lines.length || /^(none|no|n\/a)[.!]?$/i.test(lines[0])) return [];
+  const names = lines.filter((line) => {
+    const words = line.split(/\s+/).length;
+    // "Salesforce Inc." is a name; a longer line that ends like a sentence is not.
+    return line.length <= 60 && words <= 6 && !/[{}[\]:]/.test(line) && !/[?!]$/.test(line) && !(line.endsWith(".") && words > 3);
+  });
+  return [...new Set(names)].slice(0, 5);
+}
+
+/** A re-check can ask about more than the saved values: "...or shipped something big since?".
+ *  Re-running the saved query cannot answer that. So the fast model names the products or
+ *  companies the question is about, and the loop runs one dated news search for each. The
+ *  model only names things; the search wording is fixed in code. Returns [] when there is
+ *  nothing to name, or when the call fails: the answer then covers the saved values only. */
+export async function planFollowUps(
+  fast: ModelAdapter,
+  input: FollowUpInput,
+  onUsage?: (usage: Usage) => void,
+): Promise<string[]> {
+  try {
+    return parseFollowUps(await fast.complete({
+      system: FOLLOW_UP_SYSTEM,
+      messages: [{
+        role: "user",
+        content: `Saved on ${input.savedOn}: ${input.note.topic}: ${input.note.claim.slice(0, 600)}\n\nLatest user message:\n${input.userText}\n\nReply now with NONE or the names, one per line.`,
+      }],
+      maxTokens: 400,
+      effort: "low",
+      ...(onUsage ? { onUsage } : {}),
+    }));
+  } catch (error) {
+    console.warn("[router] follow-up planning failed:", error instanceof Error ? error.message : error);
+    return [];
+  }
 }

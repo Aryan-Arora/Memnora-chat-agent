@@ -169,6 +169,108 @@ test("agent stores, retrieves and re-checks a volatile note", async () => {
   memory.close();
 });
 
+test("a re-check that asks what has happened since adds dated news in a second part", async () => {
+  const memory = createSqliteMemory(":memory:");
+  await memory.saveNote({
+    id: "crm-note", conversationId: "old", createdAt: "2026-11-09T10:00:00Z",
+    topic: "CRM shortlist prices", claim: "Acme CRM costs $10 and Bolt CRM costs $12.",
+    sources: [], query: "Acme Bolt CRM prices", volatility: "volatile",
+  });
+  await memory.saveRecheck({
+    id: "crm-snapshot", noteId: "crm-note", conversationId: "old", createdAt: "2026-11-09T10:00:00Z",
+    query: "Acme Bolt CRM prices", snapshot: { acme_usd: 10, bolt_usd: 12 },
+  });
+
+  const searches: { query: string; sinceDays?: number }[] = [];
+  const search: SearchTool = {
+    async search(query, opts) {
+      searches.push({ query, ...(opts?.sinceDays ? { sinceDays: opts.sinceDays } : {}) });
+      if (query === "Acme Bolt CRM prices") return [{ title: "Prices", url: "https://example.com/prices", snippet: "Acme $10, Bolt $12" }];
+      if (query === "Acme CRM news") {
+        return [
+          { title: "Acme ships Autopilot", url: "https://example.com/acme-new", snippet: "Acme launched Autopilot.", publishedAt: "Thu, 12 Nov 2026 09:00:00 GMT" },
+          { title: "Acme in 2025", url: "https://example.com/acme-old", snippet: "Old news.", publishedAt: "Mon, 03 Mar 2025 09:00:00 GMT" },
+          { title: "Acme profile", url: "https://example.com/acme-undated", snippet: "No date." },
+        ];
+      }
+      return []; // nothing in the news for Bolt
+    },
+  };
+  const systems: string[] = [];
+  const contexts: string[] = [];
+  const model: ModelAdapter = {
+    name: "follow-up-test",
+    async complete(req) {
+      // The fast model only names the products; the loop turns each name into a news search.
+      return req.system.startsWith("FOLLOW-UP") ? "Acme CRM\nBolt CRM" : "NO";
+    },
+    async *stream(req) {
+      systems.push(req.system);
+      contexts.push(req.context ?? "");
+      yield systems.length === 1 ? "Prices are unchanged." : "## Since 2026-11-09\n- Acme launched Autopilot [2].";
+    },
+  };
+  const events: AgentEvent[] = [];
+  await runAgent(
+    { fast: model, main: model, search, memory, now: () => new Date("2026-11-15T10:00:00Z") },
+    "new",
+    "The CRM shortlist was made on Monday: has any changed pricing or shipped something big since?",
+    (event) => events.push(event),
+  );
+  await waitForMemoryTasks("new");
+
+  // The saved query runs unchanged. Each news search is limited to the days since the note.
+  assert.deepEqual(searches, [
+    { query: "Acme Bolt CRM prices" },
+    { query: "Acme CRM news", sinceDays: 7 },
+    { query: "Bolt CRM news", sinceDays: 7 },
+  ]);
+  // First part: the comparison, told to leave news to the second part.
+  assert.equal(systems.length, 2);
+  assert.match(contexts[0], /a section on what has happened since will be added/);
+  // Second part: only the result dated after the note counts as news, numbered after the first part's sources.
+  assert.match(contexts[1], /\[2\] Acme ships Autopilot \(https:\/\/example\.com\/acme-new\) published 2026-11-12/);
+  assert.doesNotMatch(contexts[1], /acme-old|acme-undated/);
+  assert.match(contexts[1], /Search "Bolt CRM news": nothing dated since 2026-11-09\./);
+  assert.match(contexts[1], /already shown to the user:\nPrices are unchanged\./);
+
+  const lastSources = events.filter((event) => event.type === "sources").at(-1);
+  assert.deepEqual(
+    lastSources?.type === "sources" ? lastSources.sources.map((source) => source.url) : [],
+    ["https://example.com/prices", "https://example.com/acme-new"],
+  );
+  const saved = (await memory.recent(10)).find((message) => message.role === "assistant");
+  assert.equal(saved?.content, "Prices are unchanged.\n\n## Since 2026-11-09\n- Acme launched Autopilot [2].");
+  memory.close();
+});
+
+test("a repaired legacy query is persisted on its original SQLite note", async () => {
+  const memory = createSqliteMemory(":memory:");
+  await memory.saveNote({
+    id: "legacy-note", conversationId: "old", createdAt: "2026-11-09T10:00:00Z",
+    topic: "CRM starting prices", claim: "HubSpot, Pipedrive and Zoho prices were compared.",
+    sources: [], volatility: "volatile",
+    query: "I compared CRM tools on Monday; have any of their prices changed since then? Please cite sources.",
+  });
+  const model: ModelAdapter = {
+    name: "legacy-query-test",
+    async complete(req) {
+      if (req.system.startsWith("SEARCH QUERY REPAIR")) return "QUERY: HubSpot Pipedrive Zoho CRM starting prices";
+      if (req.system.startsWith("FOLLOW-UP")) return "NONE";
+      return ""; // the background extractor may safely reject this
+    },
+    async *stream() { yield "The prices were checked."; },
+  };
+  await runAgent({
+    fast: model, main: model, memory, now: () => new Date("2026-11-15T10:00:00Z"),
+    search: { async search() { return [{ title: "CRM pricing", url: "https://example.com", snippet: "Current prices" }]; } },
+  }, "new", "I asked about the CRM prices earlier. Are they still correct today?", () => {});
+  await waitForMemoryTasks("new");
+  const repaired = (await memory.retrieve("CRM starting prices", undefined, 10)).find((item) => item.id === "legacy-note");
+  assert.equal(repaired?.query, "HubSpot Pipedrive Zoho CRM starting prices");
+  memory.close();
+});
+
 test("SQLite conversation deletion removes transcript, notes and ledger", async () => {
   const memory = createSqliteMemory(":memory:");
   await memory.save({ id: "m", role: "user", content: "hello", createdAt: "2026-11-10T00:00:00Z", conversationId: "c" });

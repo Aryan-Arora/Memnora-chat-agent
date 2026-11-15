@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { route, routerInput, type RouteInput } from "../src/agent/router.js";
+import { needsQueryRepair, parseFollowUps, planFollowUps, route, routerInput, type RouteInput } from "../src/agent/router.js";
 import type { MemoryNote, ModelAdapter } from "../src/types.js";
 
 /** A fast model that always gives the same reply (or always fails), and counts its calls. */
@@ -32,6 +32,20 @@ test("a re-check reuses the saved query and does not call the model", async () =
   const decision = await route(fast.model, input("Has any of them changed pricing since Monday?", { notes: [saved] }));
   assert.deepEqual(decision, { query: "CRM starting prices small team", source: "stored query", recheckNote: saved });
   assert.equal(fast.calls(), 0);
+});
+
+test("a conversational legacy query is repaired while a concise query stays on the fast path", async () => {
+  assert.equal(needsQueryRepair("CRM starting prices small team"), false);
+  assert.equal(needsQueryRepair("I shortlisted five CRM tools on Monday; have any of their prices changed since?"), true);
+  const fast = fakeFast("QUERY: HubSpot Pipedrive Zoho Freshsales Salesforce starting prices");
+  const saved = note({ query: "I shortlisted five CRM tools on Monday; have any of their prices changed since?" });
+  const decision = await route(fast.model, input("Are those prices still correct?", { notes: [saved] }));
+  assert.deepEqual(decision, {
+    query: "HubSpot Pipedrive Zoho Freshsales Salesforce starting prices",
+    source: "stored query",
+    recheckNote: saved,
+  });
+  assert.equal(fast.calls(), 1);
 });
 
 test("a recalled note is not re-checked unless the user asks about its state today", async () => {
@@ -67,6 +81,26 @@ test("an empty, unreadable or failed reply falls back to searching the raw messa
   for (const reply of ["", "I think a search would help here.", new Error("network down")]) {
     assert.deepEqual(await route(fakeFast(reply).model, input(question)), { query: question, source: "model fallback" });
   }
+});
+
+test("a follow-up plan is cleaned to short names, and NONE or junk means no follow-ups", () => {
+  for (const none of ["NONE", "No", "none.", ""]) assert.deepEqual(parseFollowUps(none), []);
+  assert.deepEqual(
+    parseFollowUps('1. HubSpot Sales Hub\n- "Pipedrive"\n* Zoho CRM\nNode.js'),
+    ["HubSpot Sales Hub", "Pipedrive", "Zoho CRM", "Node.js"],
+  );
+  // Prose, JSON and router-style replies are not names.
+  for (const junk of ['{"topic":"Acme"}', "SEARCH: Acme plan price", "Let me think about that.", "I think a search for each of these tools would help here."]) {
+    assert.deepEqual(parseFollowUps(junk), []);
+  }
+  // At most five, without duplicates. A product whose name starts with "No" is still a name.
+  assert.deepEqual(parseFollowUps("Notion\nb\nNotion\nc\nd\ne\nf"), ["Notion", "b", "c", "d", "e"]);
+});
+
+test("a failed follow-up plan means no follow-ups, not an error", async () => {
+  const input = { userText: "Has anything shipped since?", note: note(), savedOn: "2026-11-09" };
+  assert.deepEqual(await planFollowUps(fakeFast(new Error("network down")).model, input), []);
+  assert.deepEqual(await planFollowUps(fakeFast("HubSpot\nPipedrive").model, input), ["HubSpot", "Pipedrive"]);
 });
 
 test("the router sees today's date, recalled notes and recent turns", () => {

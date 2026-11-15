@@ -50,6 +50,34 @@ src/{types.ts, agent/, models/, tools/search.ts, memory/, server/}, web/, bench/
 
 ## Status log (newest first)
 
+- 2026-11-15: GPT added lazy repair for legacy memory queries after Claude finished the two-part re-check work. Clearly conversational saved queries are rewritten once by the fast model from the note's topic and claim, used immediately, and persisted back onto the same note; concise modern queries keep the zero-call stored-query path, and failed or malformed rewrites safely retain the original query. A real Haiku routing run passed 61/61 scored cases including the legacy repair ($0.0041 total). An integration test also exposed and fixed “still correct today” filtering recall to today instead of treating today as the fresh comparison point. Keyless stub routing and repair now follow the same paths.
+- 2026-11-15 (later): Claude built the "shipped something big since" check. Typecheck and 25 tests pass (3 new). A re-check now has two parts. Part 1 is as before: the saved query runs again and the answer model compares the saved values with today's results in a table. Part 2 is new: while the saved query runs, the fast model names the products or companies the question is about (`planFollowUps` in `src/agent/router.ts`); the loop runs one news search per name, limited to the days since the note, all in parallel; when part 1 has finished streaming, a second main-model call appends a "## Since <date>" section from those results.
+
+  Decisions and why:
+  1. **A second part, not one bigger answer.** A news search takes 0.25-4.4 s, after a naming call of 1-2 s. Waiting for them would add 2-4 s before the first word. As a second part they run while the table is being written, so the first word is not delayed: the wait before the answer is now the longer of the saved query and the naming call (0.8-2.0 s in the runs).
+  2. **The model only names the items; code writes the search.** When the fast model wrote whole queries it kept choosing "pricing change" even when the question asked about launches. "<name> news" returned the relevant items for every product tried (HubSpot's CEO change, Zoho's Campaigns rebuild, a Pipedrive layoff report, Node.js security releases). "Product launch" and "pricing change" each missed some, and "Node.js announcement" returned unrelated stories.
+  3. **News index with a day limit.** Probed live: only the news index returns dated results. General search with a time range or a start date returned undated, mostly irrelevant pages.
+  4. **Dates are enforced in code, not by the prompt.** A news result is kept only if it carries a publication date on or after the saved day (one day of slack). An undated or older page can never be presented as new. Sources are numbered across both parts.
+  5. **Every re-check gets the news part**, not only questions that say "shipped". A pricing-only question gets the same dated check, which answers the old caveat that comparison pages cannot prove nothing moved this week. When nothing counts, the section is one "Nothing found for X, Y and Z" line.
+
+  Measured on a fresh history seeded with the current code (three chats dated 3, 9 and 10 November; the clock fix means no manual backdating), real models and search:
+
+  | Question | First word | "Since" section starts | Total | What the section found |
+  |---|---|---|---|---|
+  | CRM shortlist made on Monday | 4.9 s | 7.6 s | 12.4 s | HubSpot CEO change (12 Nov), Pipedrive layoff report (11 Nov), Zoho Campaigns rebuild (13 Nov); nothing for Freshsales and Salesforce |
+  | What did I ask on 3 November | 1.9 s | 7.6 s | 10.4 s | Node.js 26.10 and 26.11 feature releases (reported 14 Nov); other runs found the 11 Nov security releases |
+  | Postgres hosting last Tuesday | 6.1 s | 9.5 s | 12.0 s | Nothing found |
+
+  A first word above 4 s means the model chose to reason first, as before this change. The section adds 4-5 s to the total and about 1.3 cents per re-check (one more main-model call, one fast-model call, up to five searches). `npm run bench:routing` now checks the naming step too: 60 of 60 messages routed correctly, and the right news searches on 4 of 4 re-check cases.
+
+  Fixed on the way: the comparison rule now says "changed" means the value differs (one run had labelled a row "Changed" because sources disagreed; three runs after the fix were consistent); snapshot date stamps are recognised by value, not by a list of key names (`exchange_date` had got through).
+
+  Found, not fixed:
+  - Saved queries written by the OLD code are raw sentences and search badly. "What is the current Node.js LTS version and when does its support end?" once returned pages about the word "current" and a bank called Current, and the old CRM query confirmed 0, 2 or 4 of 5 prices depending on the run. Notes created by the new router have keyword queries: 5 of 5 prices confirmed in both runs I read. Old notes in Aryan's real DB keep their old queries.
+  - The price table still rests on one broad search. A search per item would make it sturdier, at the cost of a later first word.
+  - The "Since" section sometimes still explains a result it left out.
+
+  Verified in the browser in my own test chat, not Aryan's: table, verdict, then "Since 2026-11-15: nothing found". API spend for this work: about $0.50.
 - 2026-11-15: Claude fixed the slow first word and the over-searching. Typecheck and 22 tests pass (15 old, 7 new in `test/router.test.ts`). Measured side by side against HEAD `3d2a6c9` at the same moment, real models and real search, on a throwaway copy of the seeded DB. Two runs each; seconds to the first word of the answer:
 
   | Question | Before | After |
