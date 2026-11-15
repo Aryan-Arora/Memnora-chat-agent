@@ -37,8 +37,8 @@ Write the query the way you would type it into a search engine: short, specific 
 export const FOLLOW_UP_SYSTEM = `FOLLOW-UP SEARCHES. An earlier answer is being re-checked. The search that produced it will be run again, to compare the saved values with today's. A news search will also run for each product or company involved, to show what has happened since the answer was saved.
 Reply with up to 5 lines and nothing else: the name of each product or company in the saved note that the user's message is about, one per line.
 Make each name precise enough to be unambiguous: "Render Postgres", not "Render"; "Neon Postgres", not "Neon".
-Versions or plans of one product are a single item: for Node.js 26, 24 and 22 write one line, "Node.js".
-Reply NONE only if the saved note names no specific product or company.`;
+Models, versions or plans of one product line are a single item: write "Node.js" for Node.js 26, 24 and 22; "iPhone" for iPhone 17, 17 Pro and Air; "Windows" for Windows 10 and 11.
+Reply NONE if the user's message is not about anything in the saved note, or if the note names no specific product or company.`;
 
 const QUERY_REPAIR_SYSTEM = `SEARCH QUERY REPAIR. A saved memory contains a legacy web query written as conversational prose. Rewrite it as one concise, self-contained search-engine query that will find the same facts again today.
 Reply with exactly one line: QUERY: <query>.
@@ -64,8 +64,20 @@ export interface Route {
   query: string;
   /** Which rule decided. Shown in the server log and checked by the tests. */
   source: "stored query" | "greeting rule" | "model" | "model fallback";
-  /** Set when an earlier answer is being re-checked: the note whose saved query is reused. */
+  /** Set when an earlier answer is being re-checked: notes were recalled and a search will run.
+   *  The note's saved query is reused when the message asks about its state today; otherwise
+   *  the model wrote the query. Either way the re-check gets the "since" news. */
   recheckNote?: MemoryNote;
+}
+
+/** The recalled note to re-check. One with a saved query comes first (the same search can be
+ *  run again), volatile before stable (prices and versions are what goes stale). A note
+ *  without a query still counts: the earlier answer may have been written without searching. */
+export function pickRecheckNote(notes: MemoryNote[]): MemoryNote | undefined {
+  return notes.find((note) => note.volatility === "volatile" && note.query)
+    ?? notes.find((note) => note.query)
+    ?? notes.find((note) => note.volatility === "volatile")
+    ?? notes[0];
 }
 
 /** New notes contain short router-written queries. Older notes may contain the user's whole
@@ -129,10 +141,8 @@ export async function route(
 ): Promise<Route> {
   // Rule 1: re-check. A recalled note has the query that produced the old answer, and the
   // user asks about its state today. Run that same query again, so the comparison is like
-  // for like. Volatile notes (prices, versions) come first: they are what goes stale.
-  const recheckNote = WANTS_FRESH.test(input.userText)
-    ? input.notes.find((note) => note.volatility === "volatile" && note.query) ?? input.notes.find((note) => note.query)
-    : undefined;
+  // for like.
+  const recheckNote = WANTS_FRESH.test(input.userText) ? pickRecheckNote(input.notes) : undefined;
   if (recheckNote?.query) {
     const query = await repairStoredQuery(fast, recheckNote, input.userText, onUsage);
     return { query, source: "stored query", recheckNote };
@@ -156,11 +166,18 @@ export async function route(
   } catch (error) {
     console.warn("[router] model call failed:", error instanceof Error ? error.message : error);
   }
+  // Notes were recalled and the model chose to search: the user wants today's state of that
+  // earlier answer, however they worded it ("have any of those gone up?"). So this is a
+  // re-check too, with the model's query, and it gets the same "since" news as one that reuses
+  // a saved query. A keyword list cannot catch every wording; the follow-up planner answers
+  // NONE if the message turns out to be about something else.
+  const earlier = pickRecheckNote(input.notes);
+  const recheck = earlier ? { recheckNote: earlier } : {};
   const search = reply.match(/SEARCH:\s*(.+)/i);
-  if (search) return { query: search[1].trim().replace(/^["'`]+|["'`]+$/g, ""), source: "model" };
+  if (search) return { query: search[1].trim().replace(/^["'`]+|["'`]+$/g, ""), source: "model", ...recheck };
   if (/^NO\b/i.test(reply)) return { query: "", source: "model" };
   // Fail toward searching: an empty, unreadable or failed reply must never mean "skip the web".
-  return { query: input.userText.slice(0, 200), source: "model fallback" };
+  return { query: input.userText.slice(0, 200), source: "model fallback", ...recheck };
 }
 
 export interface FollowUpInput {
@@ -197,16 +214,20 @@ export async function planFollowUps(
   onUsage?: (usage: Usage) => void,
 ): Promise<string[]> {
   try {
-    return parseFollowUps(await fast.complete({
-      system: FOLLOW_UP_SYSTEM,
-      messages: [{
-        role: "user",
-        content: `Saved on ${input.savedOn}: ${input.note.topic}: ${input.note.claim.slice(0, 600)}\n\nLatest user message:\n${input.userText}\n\nReply now with NONE or the names, one per line.`,
-      }],
-      maxTokens: 400,
-      effort: "low",
-      ...(onUsage ? { onUsage } : {}),
-    }));
+    const base = `Saved on ${input.savedOn}: ${input.note.topic}: ${input.note.claim.slice(0, 600)}\n\nLatest user message:\n${input.userText}`;
+    const ask = (content: string) => fast.complete({
+      system: FOLLOW_UP_SYSTEM, messages: [{ role: "user", content }], maxTokens: 400,
+      effort: "low", ...(onUsage ? { onUsage } : {}),
+    });
+    const names = parseFollowUps(await ask(`${base}\n\nReply now with NONE or the names, one per line.`));
+    if (names.length) return names;
+    // A short classifier occasionally replies NONE even when the note visibly names products.
+    // Retry once with the contradiction made explicit; the normal path still costs one call.
+    return parseFollowUps(await ask(
+      `${base}\n\nYour first reply named nothing. Re-read the saved topic and claim. ` +
+      `If they name any product, company or product line, list those names now, one per line. ` +
+      `Reply NONE only when there truly is no named item.`,
+    ));
   } catch (error) {
     console.warn("[router] follow-up planning failed:", error instanceof Error ? error.message : error);
     return [];

@@ -8,6 +8,8 @@ Memnora is a web-aware chat agent that remembers useful context across conversat
 
 The project deliberately gives the agent **one tool: web search**. Memory is not another tool the model chooses to call; it is a small, deterministic context layer that runs around the agent loop. This keeps the architecture fast, testable, and easy to explain.
 
+For the architecture, engineering decisions, measurements and trade-offs, read [DESIGN.md](DESIGN.md).
+
 ## What makes the memory layer different
 
 Most chat demos either paste the full transcript into every prompt or store an unstructured summary. Memnora instead treats memory as a lifecycle:

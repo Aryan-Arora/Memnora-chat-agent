@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { needsQueryRepair, parseFollowUps, planFollowUps, route, routerInput, type RouteInput } from "../src/agent/router.js";
+import { needsQueryRepair, parseFollowUps, pickRecheckNote, planFollowUps, route, routerInput, type RouteInput } from "../src/agent/router.js";
 import type { MemoryNote, ModelAdapter } from "../src/types.js";
 
 /** A fast model that always gives the same reply (or always fails), and counts its calls. */
@@ -60,6 +60,46 @@ test("a volatile note is preferred over a stable one for the re-check", async ()
   const volatile = note({ id: "volatile", query: "CRM starting prices" });
   const decision = await route(fakeFast("NO").model, input("Is that still right today?", { notes: [stable, volatile] }));
   assert.equal(decision.query, "CRM starting prices");
+});
+
+test("a note without a saved query is still the re-check note, and the model supplies the query", async () => {
+  const withoutQuery = note({ query: undefined });
+  const asked = "On Monday we shortlisted 5 CRM tools. Has any of them changed pricing since?";
+  assert.deepEqual(
+    await route(fakeFast("SEARCH: CRM tools pricing changes").model, input(asked, { notes: [withoutQuery] })),
+    { query: "CRM tools pricing changes", source: "model", recheckNote: withoutQuery },
+  );
+  // An unreadable reply still searches, and still re-checks.
+  assert.deepEqual(
+    await route(fakeFast("hmm").model, input(asked, { notes: [withoutQuery] })),
+    { query: asked, source: "model fallback", recheckNote: withoutQuery },
+  );
+  // If the model decides no search is needed there is nothing to re-check.
+  assert.deepEqual(await route(fakeFast("NO").model, input(asked, { notes: [withoutQuery] })), { query: "", source: "model" });
+});
+
+test("a re-check worded without any freshness keyword is still a re-check when the model searches", async () => {
+  const saved = note({ query: "CRM starting prices small team" });
+  // "gone up" is in no keyword list. The saved query is not reused (the model is asked), but the note is re-checked.
+  const decision = await route(fakeFast("SEARCH: HubSpot Pipedrive pricing").model, input("Have any of those prices gone up?", { notes: [saved] }));
+  assert.deepEqual(decision, { query: "HubSpot Pipedrive pricing", source: "model", recheckNote: saved });
+  // And when the model says no search is needed, nothing is re-checked.
+  assert.deepEqual(
+    await route(fakeFast("NO").model, input("What was on the shortlist from Monday?", { notes: [saved] })),
+    { query: "", source: "model" },
+  );
+});
+
+test("the re-check note is the best recalled one: with a query, then volatile, then any", () => {
+  const stableWithQuery = note({ id: "a", volatility: "stable", query: "history" });
+  const volatileNoQuery = note({ id: "b", query: undefined });
+  const volatileWithQuery = note({ id: "c", query: "prices" });
+  const stableNoQuery = note({ id: "d", volatility: "stable", query: undefined });
+  assert.equal(pickRecheckNote([stableNoQuery, volatileNoQuery, stableWithQuery, volatileWithQuery])?.id, "c");
+  assert.equal(pickRecheckNote([stableNoQuery, volatileNoQuery, stableWithQuery])?.id, "a");
+  assert.equal(pickRecheckNote([stableNoQuery, volatileNoQuery])?.id, "b");
+  assert.equal(pickRecheckNote([stableNoQuery])?.id, "d");
+  assert.equal(pickRecheckNote([]), undefined);
 });
 
 test("only a bare greeting skips the model", async () => {

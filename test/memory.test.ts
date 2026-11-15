@@ -169,7 +169,7 @@ test("agent stores, retrieves and re-checks a volatile note", async () => {
   memory.close();
 });
 
-test("a re-check that asks what has happened since adds dated news in a second part", async () => {
+test("a re-check adds a Since section from dated, filtered news while the first part is written", async () => {
   const memory = createSqliteMemory(":memory:");
   await memory.saveNote({
     id: "crm-note", conversationId: "old", createdAt: "2026-11-09T10:00:00Z",
@@ -196,43 +196,59 @@ test("a re-check that asks what has happened since adds dated news in a second p
       return []; // nothing in the news for Bolt
     },
   };
-  const systems: string[] = [];
-  const contexts: string[] = [];
-  const model: ModelAdapter = {
-    name: "follow-up-test",
+  const filterPrompts: string[] = [];
+  let filterStarted!: () => void;
+  const started = new Promise<void>((resolve) => { filterStarted = resolve; });
+  const fast: ModelAdapter = {
+    name: "fast-test",
     async complete(req) {
-      // The fast model only names the products; the loop turns each name into a news search.
-      return req.system.startsWith("FOLLOW-UP") ? "Acme CRM\nBolt CRM" : "NO";
+      // The fast model names the products and filters the news; the loop turns each name into a news search.
+      if (req.system.startsWith("FOLLOW-UP")) return "Acme CRM\nBolt CRM";
+      if (req.system.startsWith("NEWS FILTER")) {
+        filterPrompts.push(req.messages[0].content);
+        filterStarted();
+        return JSON.stringify({ events: [{ ns: [2], kind: "launch", summary: "Acme launched Autopilot, its AI sales assistant." }] });
+      }
+      return "NO";
     },
-    async *stream(req) {
-      systems.push(req.system);
-      contexts.push(req.context ?? "");
-      yield systems.length === 1 ? "Prices are unchanged." : "## Since 2026-11-09\n- Acme launched Autopilot [2].";
+    async *stream() { /* the fast model never streams here */ },
+  };
+  let mainCalls = 0;
+  const main: ModelAdapter = {
+    name: "main-test",
+    async complete() { return "NO"; },
+    async *stream() {
+      mainCalls += 1;
+      // The first part may not finish until the news filter has started. If the filter only ran
+      // after the first part (the old order), this wait would time out and fail the test.
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([
+        started,
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("the news filter did not start while the first part was being written")), 2000); }),
+      ]).finally(() => clearTimeout(timer));
+      yield "Prices are unchanged.";
     },
   };
   const events: AgentEvent[] = [];
   await runAgent(
-    { fast: model, main: model, search, memory, now: () => new Date("2026-11-15T10:00:00Z") },
+    { fast, main, search, memory, now: () => new Date("2026-11-15T10:00:00Z") },
     "new",
     "The CRM shortlist was made on Monday: has any changed pricing or shipped something big since?",
     (event) => events.push(event),
   );
   await waitForMemoryTasks("new");
 
+  assert.deepEqual(events.filter((event) => event.type === "error"), []);
   // The saved query runs unchanged. Each news search is limited to the days since the note.
   assert.deepEqual(searches, [
     { query: "Acme Bolt CRM prices" },
     { query: "Acme CRM news", sinceDays: 7 },
     { query: "Bolt CRM news", sinceDays: 7 },
   ]);
-  // First part: the comparison, told to leave news to the second part.
-  assert.equal(systems.length, 2);
-  assert.match(contexts[0], /a section on what has happened since will be added/);
-  // Second part: only the result dated after the note counts as news, numbered after the first part's sources.
-  assert.match(contexts[1], /\[2\] Acme ships Autopilot \(https:\/\/example\.com\/acme-new\) published 2026-11-12/);
-  assert.doesNotMatch(contexts[1], /acme-old|acme-undated/);
-  assert.match(contexts[1], /Search "Bolt CRM news": nothing dated since 2026-11-09\./);
-  assert.match(contexts[1], /already shown to the user:\nPrices are unchanged\./);
+  assert.equal(mainCalls, 1, "the Since section is written by code, not by a second answer-model call");
+  // The filter sees only the result dated after the note, numbered after the first part's sources.
+  assert.match(filterPrompts[0], /\[2\] searched for: Acme CRM \| example\.com \| published 12 Nov/);
+  assert.doesNotMatch(filterPrompts[0], /acme-old|acme-undated|Acme in 2025|Acme profile/);
 
   const lastSources = events.filter((event) => event.type === "sources").at(-1);
   assert.deepEqual(
@@ -240,7 +256,117 @@ test("a re-check that asks what has happened since adds dated news in a second p
     ["https://example.com/prices", "https://example.com/acme-new"],
   );
   const saved = (await memory.recent(10)).find((message) => message.role === "assistant");
-  assert.equal(saved?.content, "Prices are unchanged.\n\n## Since 2026-11-09\n- Acme launched Autopilot [2].");
+  assert.equal(
+    saved?.content,
+    "Prices are unchanged.\n\n## Since 2026-11-09\n\n- **Acme CRM** (launch, 12 Nov): Acme launched Autopilot, its AI sales assistant. [2]\n- Nothing found for Bolt CRM.",
+  );
+  memory.close();
+});
+
+test("a failed news filter says so and keeps the answer", async () => {
+  const memory = createSqliteMemory(":memory:");
+  await memory.saveNote({
+    id: "n", conversationId: "old", createdAt: "2026-11-09T10:00:00Z", topic: "CRM prices",
+    claim: "Acme CRM costs $10.", sources: [], query: "Acme CRM prices", volatility: "volatile",
+  });
+  const model: ModelAdapter = {
+    name: "filter-failure-test",
+    async complete(req) {
+      if (req.system.startsWith("FOLLOW-UP")) return "Acme CRM";
+      if (req.system.startsWith("NEWS FILTER")) throw new Error("filter down");
+      return "NO";
+    },
+    async *stream() { yield "Still $10."; },
+  };
+  const events: AgentEvent[] = [];
+  await runAgent({
+    fast: model, main: model, memory, now: () => new Date("2026-11-15T10:00:00Z"),
+    search: {
+      async search(_query, opts) {
+        return opts?.sinceDays
+          ? [{ title: "Acme news", url: "https://example.com/news", snippet: "x", publishedAt: "Thu, 12 Nov 2026 09:00:00 GMT" }]
+          : [{ title: "Acme prices", url: "https://example.com/prices", snippet: "Acme $10" }];
+      },
+    },
+  }, "new", "Has the Acme CRM price changed since Monday?", (event) => events.push(event));
+  await waitForMemoryTasks("new");
+  assert.deepEqual(events.filter((event) => event.type === "error"), []);
+  const saved = (await memory.recent(10)).find((message) => message.role === "assistant");
+  assert.equal(saved?.content, "Still $10.\n\n## Since 2026-11-09\n\n- I could not check what has happened since: the news step failed.");
+  memory.close();
+});
+
+test("a recalled note with no saved query is still re-checked, with news since", async () => {
+  const memory = createSqliteMemory(":memory:");
+  // An earlier answer written without searching leaves a note, but no query to run again.
+  await memory.saveNote({
+    id: "no-query", conversationId: "old", createdAt: "2026-11-09T10:00:00Z",
+    topic: "CRM shortlist", claim: "Acme CRM and Bolt CRM were shortlisted; Acme costs $10.",
+    sources: [], volatility: "volatile",
+  });
+  const searches: { query: string; sinceDays?: number }[] = [];
+  const search: SearchTool = {
+    async search(query, opts) {
+      searches.push({ query, ...(opts?.sinceDays ? { sinceDays: opts.sinceDays } : {}) });
+      return [];
+    },
+  };
+  const model: ModelAdapter = {
+    name: "no-query-test",
+    async complete(req) {
+      if (req.system.startsWith("ROUTER")) return "SEARCH: Acme CRM Bolt CRM pricing";
+      if (req.system.startsWith("FOLLOW-UP")) return "Acme CRM";
+      return "NO";
+    },
+    async *stream() { yield "Checked."; },
+  };
+  await runAgent(
+    { fast: model, main: model, search, memory, now: () => new Date("2026-11-15T10:00:00Z") },
+    "new",
+    "On Monday we shortlisted 5 CRM tools. Has any of them changed pricing or shipped something big since?",
+    () => {},
+  );
+  await waitForMemoryTasks("new");
+  assert.deepEqual(searches, [
+    { query: "Acme CRM Bolt CRM pricing" },
+    { query: "Acme CRM news", sinceDays: 7 },
+  ]);
+  const saved = (await memory.recent(10)).find((message) => message.role === "assistant");
+  assert.match(saved?.content ?? "", /## Since 2026-11-09\n\n- Nothing found for Acme CRM\./);
+  memory.close();
+});
+
+test("the user's own words from the named day reach the answer model, so they can be quoted", async () => {
+  const memory = createSqliteMemory(":memory:");
+  await memory.save({
+    id: "asked", role: "user", content: "What's the latest iPhone and how much does it cost?",
+    createdAt: "2026-11-03T10:00:00.000Z", conversationId: "old",
+  });
+  await memory.save({
+    id: "answered", role: "assistant", content: "Raw assistant text that only the note should carry.",
+    createdAt: "2026-11-03T10:00:09.000Z", conversationId: "old",
+  });
+  await memory.saveNote({
+    id: "iphone", conversationId: "old", createdAt: "2026-11-03T10:00:09.000Z", topic: "Latest iPhone and price",
+    claim: "The iPhone 17 starts at $799.", sources: [], query: "latest iPhone price", volatility: "volatile",
+  });
+  const contexts: string[] = [];
+  const model: ModelAdapter = {
+    name: "own-words-test",
+    async complete(req) { return req.system.startsWith("FOLLOW-UP") ? "NONE" : "NO"; },
+    async *stream(req) { contexts.push(req.context ?? ""); yield "You asked about the latest iPhone."; },
+  };
+  await runAgent(
+    {
+      fast: model, main: model, memory, now: () => new Date("2026-11-15T10:00:00Z"),
+      search: { async search() { return [{ title: "Apple", url: "https://example.com", snippet: "iPhone 17 $799" }]; } },
+    },
+    "new", "What did I ask you on 3 November? Is your answer still correct today?", () => {}, { timeZone: "UTC" },
+  );
+  await waitForMemoryTasks("new");
+  assert.match(contexts[0], /What the user wrote on that day, in their own words/);
+  assert.match(contexts[0], /\[2026-11-03 10:00\] What's the latest iPhone and how much does it cost\?/);
+  assert.doesNotMatch(contexts[0], /Raw assistant text/);
   memory.close();
 });
 

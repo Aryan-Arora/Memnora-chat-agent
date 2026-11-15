@@ -50,6 +50,26 @@ src/{types.ts, agent/, models/, tools/search.ts, memory/, server/}, web/, bench/
 
 ## Status log (newest first)
 
+- 2026-11-15: Aryan provided the final hiring-challenge rules and asked for submission cleanup. GPT removed the public video script, removed unused Google/xAI variables from `.env.example`, declared Node >=22.5 for built-in SQLite, audited install/dev/key requirements, and added `DESIGN.md` covering the implemented architecture, decisions, measurements, failure modes, limitations, and future work.
+- 2026-11-15 (scorecard, Claude): the brief's three questions asked word for word (the brief says "20-person sales team" and "Last Tuesday I asked you about Postgres hosting"; my earlier tests used other wording) on HEAD `3b1bb77`, Sunday 15 Nov, zone Asia/Kolkata, real models and search. 27 tests pass. History was built by running the current agent on 3 Nov ("latest iPhone and price"), Mon 9 Nov ("shortlist 5 CRM tools for a 20-person sales team", no prices requested) and Tue 10 Nov ("which managed Postgres hosting should I use for a small SaaS"). Seconds, run 1 / run 2:
+
+  | Question | First word | "Since" section starts | Total | Cost |
+  |---|---|---|---|---|
+  | Q1 CRM, with history | 2.4 / 6.0 | 5.7 / 9.3 | 9.2 / 13.3 | $0.032 |
+  | Q2 3 November, with history | 2.6 / 2.3 | 5.3 / 5.3 | 7.7 / 7.0 | $0.021 |
+  | Q3 Postgres, with history | 2.5 / 5.4 | 5.8 / 9.1 | 8.6 / 12.1 | $0.028 |
+  | Q1 / Q2 / Q3, empty database | 4.4 / 2.9 / 7.3 | none | 6.9 / 3.9 / 10.0 | $0.002-0.012 |
+
+  With history all three are correct and complete: the right day is found, the saved note recalled, every saved value compared (then / now / status with citations), then a dated "Since" section from one news search per product (HubSpot's CEO change on 12 Nov, a Pipedrive layoff report, Zoho's Campaigns rebuild; for Postgres only DigitalOcean's earnings and a launch, nothing on database pricing). With an empty database it does not invent a shortlist: it says it has no record, asks which five tools, and for Postgres gives today's prices with dates. The cost of the whole check was about 23 cents.
+
+  Gaps found, in the order I would fix them:
+  1. **A recalled note with no saved search query gets one search and no "Since" section** (verified with fake models: with a query 3 searches run, without one 1 runs). It happens when the earlier answer was written without searching. `recheckNote` is only set by the stored-query rule in `router.ts`; it should be set for the best recalled note whenever the message asks about today's state, with the query then coming from the router.
+  2. **Q2 paraphrases the question** ("you asked for the latest iPhone model and its starting prices") instead of quoting it ("What's the latest iPhone and how much does it cost?"). The raw message is in the messages table, but `loop.ts` loads raw messages only when no note matches. Add that day's user messages when a date resolves.
+  3. **Part 2 waits for part 1 to finish streaming.** Its searches are done by about 3.5 s, but the second model call starts at 5.3-9.3 s. Starting it in parallel and appending the buffered text when part 1 ends should cut the total by about 2-3 s. Its closing sentence has to stop depending on part 1's verdict.
+  4. **Speed spread.** The floor is about 2.4 s (saved query 1.5 s, then 0.9 s for the model). The 5-6 s first words are slow Tavily calls (1.1 to 3.6 s seen) or the model reasoning first at low effort. Without history the first word is 3-7 s because the router call and the search both come first.
+  5. **Planner groups badly sometimes:** five iPhone models gave five news searches and "Nothing found for iPhone 17, iPhone 17 Pro..."; it should be one "iPhone" search.
+  6. **"Since" precision:** it counts marketing content as a release (Salesforce's ROI report) and still explains results it left out ("Nothing that counts. [6] and [7] are a review...").
+
 - 2026-11-15: GPT added lazy repair for legacy memory queries after Claude finished the two-part re-check work. Clearly conversational saved queries are rewritten once by the fast model from the note's topic and claim, used immediately, and persisted back onto the same note; concise modern queries keep the zero-call stored-query path, and failed or malformed rewrites safely retain the original query. A real Haiku routing run passed 61/61 scored cases including the legacy repair ($0.0041 total). An integration test also exposed and fixed “still correct today” filtering recall to today instead of treating today as the fresh comparison point. Keyless stub routing and repair now follow the same paths.
 - 2026-11-15 (later): Claude built the "shipped something big since" check. Typecheck and 25 tests pass (3 new). A re-check now has two parts. Part 1 is as before: the saved query runs again and the answer model compares the saved values with today's results in a table. Part 2 is new: while the saved query runs, the fast model names the products or companies the question is about (`planFollowUps` in `src/agent/router.ts`); the loop runs one news search per name, limited to the days since the note, all in parallel; when part 1 has finished streaming, a second main-model call appends a "## Since <date>" section from those results.
 

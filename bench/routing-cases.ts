@@ -61,9 +61,19 @@ export const ROUTING_CASES: RoutingCase[] = [
   { text: "How much is the second one?", want: "search", why: "follow-up", turns: crmTurns, mustMention: /pipedrive/i },
   { text: "When was it released?", want: "search", why: "follow-up", turns: nodeTurns, mustMention: /node/i },
   { text: "Is that still the right version today?", want: "search", why: "follow-up re-check", turns: nodeTurns, mustMention: /node/i },
-  { text: "I asked about Node.js LTS on 3 November. Is that still correct today?", want: "search", why: "re-check of a note that has no saved query", notes: nodeNote, mustMention: /node/i },
-  { text: "You shortlisted some CRM tools on Monday. Have any of those prices gone up?", want: "search", why: "re-check of a note that has no saved query", notes: crmNote, mustMention: /crm|hubspot|pipedrive|zoho|freshsales|salesforce/i },
-  { text: "I asked about Node.js LTS on 3 November. Is there a newer LTS line yet?", want: "search", why: "re-check of a note that has no saved query", notes: nodeNote, mustMention: /node/i },
+  { text: "I asked about Node.js LTS on 3 November. Is that still correct today?", want: "search", why: "re-check of a note that has no saved query", notes: nodeNote, mustMention: /node/i, newsFor: ["node"], maxNews: 2 },
+  { text: "You shortlisted some CRM tools on Monday. Have any of those prices gone up?", want: "search", why: "re-check of a note that has no saved query", notes: crmNote, mustMention: /crm|hubspot|pipedrive|zoho|freshsales|salesforce/i, newsFor: ["hubspot", "pipedrive"] },
+  { text: "I asked about Node.js LTS on 3 November. Is there a newer LTS line yet?", want: "search", why: "re-check of a note that has no saved query", notes: nodeNote, mustMention: /node/i, newsFor: ["node"], maxNews: 2 },
+  {
+    text: "What did I ask you on 3 November? Is your answer still correct today?",
+    want: "search", why: "re-check of one product line: one news search, not one per model",
+    notes: [{
+      createdAt: "2026-11-03T10:00:30.000Z", topic: "Latest iPhone model and starting prices",
+      claim: "iPhone 17e $599, iPhone 17 $799, iPhone Air $999, iPhone 17 Pro $1,099, iPhone 17 Pro Max $1,199.",
+      query: "latest iPhone model price",
+    }],
+    newsFor: ["iphone"], maxNews: 2,
+  },
   {
     text: "A shortlist of 5 CRM tools was made on Monday: has any changed pricing or shipped something big since?",
     want: "search", why: "re-check that reuses the saved query, plus news for each tool",
@@ -78,6 +88,7 @@ export const ROUTING_CASES: RoutingCase[] = [
       query: "I shortlisted five CRM tools on Monday; have any of their prices changed since then? Please cite sources.",
     }],
     mustMention: /crm|hubspot|pipedrive|zoho|freshsales|salesforce/i,
+    newsFor: ["hubspot", "pipedrive"],
   },
   {
     text: "You shortlisted CRM tools on Monday. Has HubSpot shipped anything new since then?",
