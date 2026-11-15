@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  buildNewsFilterPrompt, filterNews, newsQuery, numberNews, parseNewsFilter, renderSince, searchNewsSince,
+  buildNewsFilterPrompt, filterNews, happenedBefore, newsQuery, numberNews, parseNewsFilter, renderSince, searchNewsSince,
   type NewsItem, type NewsSearch,
 } from "../src/agent/news.js";
 import type { ModelAdapter, SearchResult, SearchTool } from "../src/types.js";
 
 const result = (url: string, extra: Partial<SearchResult> = {}): SearchResult => ({
-  title: `Title of ${url}`, url, snippet: "snippet", publishedAt: "Thu, 12 Nov 2026 09:00:00 GMT", ...extra,
+  title: `Acme news: ${url}`, url, snippet: "snippet", publishedAt: "Thu, 12 Nov 2026 09:00:00 GMT", ...extra,
 });
 const shortDate = (iso: string) => (iso ? "12 Nov" : "");
 
@@ -68,6 +68,57 @@ test("the filter's reply is validated: unknown kinds, unseen numbers and empty s
   assert.deepEqual(mixed, [{ ns: [3, 2, 4], kind: "company", summary: "Kept, with only the shown numbers." }]);
   // Unreadable is null (the section says so); readable with no events is [].
   for (const bad of ["", "not json", '{"results":[]}', '{"events":"none"}']) assert.equal(parseNewsFilter(bad, valid), null);
+});
+
+test("an event the filter dates before the saved day is dropped by code; unknown dates are kept", async () => {
+  // Month-only dates count as the whole month. Full dates get one day of slack.
+  assert.equal(happenedBefore("2026-04", "2026-11-09"), true);
+  assert.equal(happenedBefore("2026-11", "2026-11-09"), false);
+  assert.equal(happenedBefore("2026-11-07", "2026-11-09"), true);
+  assert.equal(happenedBefore("2026-11-08", "2026-11-09"), false);
+  assert.equal(happenedBefore("2026-11-12", "2026-11-09"), false);
+  assert.equal(happenedBefore("unknown", "2026-11-09"), false);
+  assert.equal(happenedBefore(undefined, "2026-11-09"), false);
+
+  const parsed = parseNewsFilter(JSON.stringify({ events: [
+    { ns: [2], kind: "company", happened: "2026-11-12", summary: "New CEO." },
+    { ns: [3], kind: "price", happened: "2026-04", summary: "Moved to pay-per-result pricing in April." },
+    { ns: [4], kind: "launch", happened: "last spring", summary: "Unreadable date is not kept as a date." },
+  ] }), new Set([2, 3, 4]));
+  assert.deepEqual(parsed?.map((event) => event.happened), ["2026-11-12", "2026-04", undefined]);
+
+  // filterNews applies it: the April event is gone, the other two stay.
+  const model: ModelAdapter = {
+    name: "dated-filter-test",
+    async complete() { return JSON.stringify({ events: [
+      { ns: [2], kind: "company", happened: "2026-11-12", summary: "New CEO." },
+      { ns: [3], kind: "price", happened: "2026-04", summary: "Moved to pay-per-result pricing in April." },
+      { ns: [4], kind: "launch", happened: "unknown", summary: "Shipped a feature." },
+    ] }); },
+    async *stream() { /* unused */ },
+  };
+  const items = [2, 3, 4].map((n) => ({ n, name: "Acme", result: result(`https://example.com/${n}`) }));
+  const kept = await filterNews(model, { topic: "t", savedOn: "2026-11-09", question: "q", items, shortDate });
+  assert.deepEqual(kept?.map((event) => event.ns[0]), [2, 4]);
+});
+
+test("an event whose cited pages never mention the searched company is dropped", async () => {
+  const items = [
+    { n: 2, name: "Neon Postgres", result: result("https://example.com/xata", { title: "ClickHouse buys Xata", content: "The Berlin agent-native Postgres company joins ClickHouse." }) },
+    { n: 3, name: "Neon Postgres", result: result("https://example.com/neon", { title: "Neon adds branching", content: "neon launched a new feature." }) },
+    { n: 4, name: "HubSpot Sales Hub", result: result("https://example.com/hub", { title: "HubSpot names CEO", content: "x" }) },
+  ];
+  const model: ModelAdapter = {
+    name: "wrong-company-test",
+    async complete() { return JSON.stringify({ events: [
+      { ns: [2], kind: "company", happened: "2026-11-10", summary: "ClickHouse acquired Xata." },
+      { ns: [3], kind: "launch", happened: "2026-11-12", summary: "Neon added branching." },
+      { ns: [2, 4], kind: "company", happened: "2026-11-12", summary: "Kept: one cited page does name HubSpot." },
+    ] }); },
+    async *stream() { /* unused */ },
+  };
+  const kept = await filterNews(model, { topic: "t", savedOn: "2026-11-09", question: "q", items, shortDate });
+  assert.deepEqual(kept?.map((event) => event.summary), ["Neon added branching.", "Kept: one cited page does name HubSpot."]);
 });
 
 test("the section is written by code: events, then products with nothing, then failures", () => {

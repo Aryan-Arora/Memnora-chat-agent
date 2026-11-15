@@ -50,6 +50,37 @@ src/{types.ts, agent/, models/, tools/search.ts, memory/, server/}, web/, bench/
 
 ## Status log (newest first)
 
+- 2026-11-15 (fixes after the scorecard, Claude): fixed the gaps the scorecard found. 40 tests pass; `npm run bench:routing` scores 63 of 63 messages and 10 of 10 re-checks get the right news searches. Most of this was committed by GPT in `c93504a`; four files with the last refinements (`news.ts`, `router.ts`, `routing-cases.ts`, `news.test.ts`) were uncommitted when I stopped. Same seeded history, the brief's exact wording, real models and search. Shipped configuration, three runs; before in brackets (two runs):
+
+  | Question | First word | Total | Cost |
+  |---|---|---|---|
+  | Q1 CRM | 2.1, 2.4, 2.2 s (2.4, 6.0) | 7.7, 9.3, 8.1 s (9.2, 13.3) | $0.014 ($0.032) |
+  | Q2 3 November | 1.8, 2.3, 2.1 s (2.6, 2.3) | 5.3, 5.1, 5.0 s (7.7, 7.0) | $0.012 ($0.021) |
+  | Q3 Postgres | 2.0, 1.9, 2.1 s (2.5, 5.4) | 7.9, 5.8, 6.3 s (8.6, 12.1) | $0.015 ($0.028) |
+
+  The first word is about the same as before: the slow first words in the earlier runs were provider variance, not something this round changed. The totals are 30 to 40% shorter and the cost about half.
+
+  What changed:
+  1. **Any recalled note is re-checked, with or without a saved query.** Before, only a note with a saved query got the "Since" news; a Monday answer written without searching got one search and nothing else. Now notes recalled plus a search means a re-check (`pickRecheckNote` in `router.ts`), however the user words it ("have any of those gone up?" has no freshness keyword). The saved query is reused only when the message asks about the note's state today; a query the model wrote is never saved onto the note. Verified live with every note stripped of its query and saved values: all three questions got the section.
+  2. **"What did I ask?" is quoted.** When a day is named and notes are recalled, that day's user messages (not this chat's, at most 8, 400 characters each) go to the answer model, and the prompt says to quote them. All answers now open with the exact words, e.g. `On 3 November you asked: "What's the latest iPhone and how much does it cost?"`.
+  3. **The "Since" section is no longer a second answer-model call.** `news.ts`: code searches and drops anything undated or older than the saved day; the fast model returns the real events as JSON (kind, who, when, one-sentence summary, cited numbers); code writes the lines. It starts when the news searches finish, while the table is still streaming, so it is usually ready the moment the table ends. This removed the 3 to 5 s wait and the Sonnet call (about 1.3 cents), and a rejected result can no longer be described.
+  4. **Product lines are one search.** The planner groups models and versions ("iPhone", not five models) and names ambiguous words fully ("Close CRM": "Close news" had returned court stories).
+  5. **Precision.** The old section called a Salesforce ROI report a release and explained results it had been told to leave out. Now only events survive, and two cheap code checks back the filter up: an event it dates before the saved day is dropped (`happenedBefore`), and so is one whose cited pages never mention the searched company (an acquisition of another company had been listed under "Neon Postgres").
+
+  Tried and rejected, with numbers (ten runs each on four real prompts):
+  - **Filter with reasoning off.** 1.2 s faster (median 1.2 s vs 2.3 s, worst 2.3 s vs 5.9 s) but unreliable even with the code checks: it missed events in 6 of 10 CRM runs, listed an iPhone roundup page as a launch in 6 of 10, and a study about apps built on Supabase as Supabase news in 10 of 10. With reasoning on, all 40 runs were right: the same three real CRM events 10 of 10, no false positive on the other three prompts. Reasoning stays on; the extra second mostly hides behind the table. (The adapter option I built for this was removed again.)
+  - **Extra prompt sentences to stop false positives** ("a study about other people's apps is not an event", "never list an event and then say it isn't one"): the Supabase false positive went from 3 of 10 runs to 9 of 10.
+  - **An `about` field to name who did it:** the model just copied the searched name, and the iPhone roundup got through in 5 of 6 runs.
+  Lesson: with a no-reasoning model, small prompt changes shift behaviour unpredictably; measure every change on repeated runs of real prompts, and put checks in code.
+
+  Still open:
+  - The "Since" content varies a little by run: Zoho's Campaigns rebuild and Salesforce's "R&D agents" release are listed in some runs and not in others (both are borderline for "shipped something big").
+  - The section can finish after the table when a news search is slow: one run took 9.3 s in total.
+  - Without saved values the answer model reasons longer: first word 3.7 to 8.3 s in that variant.
+  - With an empty database the first word is 2.7 to 5.1 s (router and search come first); it says it has no record and asks, it does not invent.
+  - Part 1 still rests on one broad saved query, so some prices come back "not confirmed" in some runs.
+  - `DESIGN.md` is 266 lines; the brief asks for one page.
+  API spend this round: about 55 cents.
 - 2026-11-15: Aryan provided the final hiring-challenge rules and asked for submission cleanup. GPT removed the public video script, removed unused Google/xAI variables from `.env.example`, declared Node >=22.5 for built-in SQLite, audited install/dev/key requirements, and added `DESIGN.md` covering the implemented architecture, decisions, measurements, failure modes, limitations, and future work.
 - 2026-11-15 (scorecard, Claude): the brief's three questions asked word for word (the brief says "20-person sales team" and "Last Tuesday I asked you about Postgres hosting"; my earlier tests used other wording) on HEAD `3b1bb77`, Sunday 15 Nov, zone Asia/Kolkata, real models and search. 27 tests pass. History was built by running the current agent on 3 Nov ("latest iPhone and price"), Mon 9 Nov ("shortlist 5 CRM tools for a 20-person sales team", no prices requested) and Tue 10 Nov ("which managed Postgres hosting should I use for a small SaaS"). Seconds, run 1 / run 2:
 

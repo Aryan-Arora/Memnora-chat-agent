@@ -36,6 +36,9 @@ export interface NewsEvent {
   ns: number[];
   kind: EventKind;
   summary: string;
+  /** When the event itself happened ("2026-11-12" or "2026-11"), as the filter read it from the
+   *  result's text. Absent when the result does not say. */
+  happened?: string;
 }
 
 /** "<name> news" returned relevant items for every product tried; "<name> pricing change" and
@@ -77,13 +80,14 @@ export function numberNews(searches: NewsSearch[], firstNumber: number, usedUrls
   return items;
 }
 
-export const NEWS_FILTER_SYSTEM = `NEWS FILTER. A user asked what has happened since an earlier answer was saved. You get numbered news results, each found by searching for one product or company, all dated on or after the saved answer.
+export const NEWS_FILTER_SYSTEM = `NEWS FILTER. A user asked what has happened since an earlier answer was saved. You get numbered news results, each found by searching for one product or company, all published on or after the saved answer.
 Pick out the results that report a real event, by the company that makes that product, that bears on the user's question. Reply with JSON only:
-{"events":[{"ns":[7,8],"kind":"launch","summary":"..."}]}
+{"events":[{"ns":[7,8],"kind":"launch","happened":"2026-11-12","summary":"..."}]}
 "kind" is one of:
 - "price": a price, plan or packaging change
-- "launch": a new product, feature, version or release
+- "launch": a new product, feature, version or release that customers can use
 - "company": an acquisition, funding round, leadership change, layoffs, outage or security incident
+"happened" is when the event itself happened, read from the result's text, not the date the page was published: "YYYY-MM-DD", or "YYYY-MM" if only the month is known, or "unknown" if the result does not say. The event must be new: it happened on or after the saved date. A page published after that date can still describe something older, such as a roundup, a hub page of all the news about a product, an explainer, or a passing mention of an earlier change. Those are not events.
 Not events: reviews, comparisons, buying guides, how-tos, interviews, opinion pieces, case studies, customer stories, webinars, reports and other marketing content; stock-price or earnings coverage that announces none of the three kinds above; third-party integration, plugin or marketplace pages; rumours and leaks about future products; anything about a company other than the one searched for; and events that have nothing to do with the user's question.
 If several results report the same event, list it once with every result number in "ns" (at most 3). If the event is about a different product of the same company, say which product in the summary. Write each summary as one plain sentence of at most 30 words, using only what the results state. Keep words such as "reported" or "plans to" when the result does not show the company itself confirming it.
 If no result reports an event, reply {"events":[]}.`;
@@ -132,7 +136,8 @@ export function parseNewsFilter(raw: string, valid: ReadonlySet<number>): NewsEv
   const cited = new Set<number>();
   for (const entry of list.slice(0, 12)) {
     if (!entry || typeof entry !== "object") continue;
-    const { ns: rawNs, kind, summary: rawSummary } = entry as { ns?: unknown; kind?: unknown; summary?: unknown };
+    const { ns: rawNs, kind, summary: rawSummary, happened: rawHappened } =
+      entry as { ns?: unknown; kind?: unknown; summary?: unknown; happened?: unknown };
     if (kind !== "price" && kind !== "launch" && kind !== "company") continue;
     const ns = [...new Set((Array.isArray(rawNs) ? rawNs : [rawNs]).filter(
       (n): n is number => typeof n === "number" && Number.isInteger(n) && valid.has(n) && !cited.has(n),
@@ -143,9 +148,34 @@ export function parseNewsFilter(raw: string, valid: ReadonlySet<number>): NewsEv
       : "";
     if (!ns.length || !summary) continue;
     ns.forEach((n) => cited.add(n));
-    events.push({ ns, kind, summary });
+    const happened = typeof rawHappened === "string" && /^\d{4}-\d{2}(-\d{2})?$/.test(rawHappened.trim()) ? rawHappened.trim() : undefined;
+    events.push({ ns, kind, summary, ...(happened ? { happened } : {}) });
   }
   return events;
+}
+
+/** True when the filter itself says the event happened before the saved day. Written into the
+ *  output so that code, not the model's judgement alone, drops an old event that a new page
+ *  mentions in passing. "unknown" or an unreadable date keeps the event: a news item published
+ *  in the window is trusted unless the filter says otherwise. A month-only date counts as the
+ *  whole month, so it is "before" only if that month ended before the saved day's month. */
+export function happenedBefore(happened: string | undefined, savedOn: string): boolean {
+  const m = happened?.match(/^(\d{4})-(\d{2})(?:-(\d{2}))?$/);
+  if (!m) return false;
+  if (!m[3]) return `${m[1]}-${m[2]}` < savedOn.slice(0, 7);
+  const oneDay = 86_400_000; // slack: the saved day itself and the day before are kept
+  return Date.parse(`${m[1]}-${m[2]}-${m[3]}T00:00:00Z`) < Date.parse(`${savedOn}T00:00:00Z`) - oneDay;
+}
+
+/** True when the page itself mentions the company or product that was searched for. The
+ *  planner writes names company-first ("Neon Postgres", "HubSpot Sales Hub", "Close CRM"), so
+ *  the first word is the company. This is what stops a page that matched on a generic word
+ *  ("Postgres") from being reported as news about someone else's product: an acquisition of
+ *  another company was once listed under "Neon Postgres". */
+function mentionsSearchedName(item: NewsItem): boolean {
+  const word = item.name.trim().split(/\s+/)[0]?.toLowerCase();
+  if (!word) return true;
+  return `${item.result.title} ${item.result.content ?? item.result.snippet}`.toLowerCase().includes(word);
 }
 
 /** One small fast-model call. Null means it failed or answered unreadably: the section then
@@ -157,17 +187,32 @@ export async function filterNews(
 ): Promise<NewsEvent[] | null> {
   if (!input.items.length) return [];
   try {
-    return parseNewsFilter(
+    const events = parseNewsFilter(
       await fast.complete({
         system: NEWS_FILTER_SYSTEM,
         messages: [{ role: "user", content: buildNewsFilterPrompt(input) }],
-        // Part of this budget can go to hidden reasoning before the JSON starts.
+        // Part of this budget goes to hidden reasoning before the JSON starts.
         maxTokens: 1500,
+        // Reasoning stays on. Measured on four real prompts, ten runs each: with it the filter
+        // returned the right events every time (the same three real CRM events in 10 of 10
+        // runs, and none for the three prompts that have no real news). With reasoning off it
+        // was 1.2 s faster but unreliable: it missed events in 6 of 10 CRM runs, listed an
+        // iPhone roundup page as a launch in 6 of 10, and a study about apps built on Supabase
+        // as Supabase news in 10 of 10. The call runs while the answer is being written, so the
+        // extra second mostly hides behind it.
         effort: "low",
         ...(onUsage ? { onUsage } : {}),
       }),
       new Set(input.items.map((item) => item.n)),
     );
+    // Two cheap checks in code as safety nets, each using something the filter wrote down or
+    // the page itself, never the filter's say-so alone: an event it dates before the saved
+    // day, and an event whose cited pages never mention the searched-for company (an
+    // acquisition of another company was once listed under "Neon Postgres").
+    const byNumber = new Map(input.items.map((item) => [item.n, item]));
+    return events && events.filter((event) =>
+      !happenedBefore(event.happened, input.savedOn) &&
+      event.ns.some((n) => { const item = byNumber.get(n); return item !== undefined && mentionsSearchedName(item); }));
   } catch (error) {
     console.warn("[news] filter failed:", error instanceof Error ? error.message : error);
     return null;

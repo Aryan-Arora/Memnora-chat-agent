@@ -36,7 +36,7 @@ Write the query the way you would type it into a search engine: short, specific 
 
 export const FOLLOW_UP_SYSTEM = `FOLLOW-UP SEARCHES. An earlier answer is being re-checked. The search that produced it will be run again, to compare the saved values with today's. A news search will also run for each product or company involved, to show what has happened since the answer was saved.
 Reply with up to 5 lines and nothing else: the name of each product or company in the saved note that the user's message is about, one per line.
-Make each name precise enough to be unambiguous: "Render Postgres", not "Render"; "Neon Postgres", not "Neon".
+Make each name precise enough to be unambiguous: "Render Postgres", not "Render"; "Neon Postgres", not "Neon"; "Close CRM", not "Close" (a bare common word returns unrelated news).
 Models, versions or plans of one product line are a single item: write "Node.js" for Node.js 26, 24 and 22; "iPhone" for iPhone 17, 17 Pro and Air; "Windows" for Windows 10 and 11.
 Reply NONE if the user's message is not about anything in the saved note, or if the note names no specific product or company.`;
 

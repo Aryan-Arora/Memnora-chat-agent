@@ -91,6 +91,16 @@ export const ROUTING_CASES: RoutingCase[] = [
     newsFor: ["hubspot", "pipedrive"],
   },
   {
+    text: "On Monday we shortlisted 5 CRM tools for a 20-person sales team. Has any of them changed pricing or shipped something big since?",
+    want: "search", why: "re-check where one tool is a common word: 'Close CRM', not 'Close'",
+    notes: [{
+      createdAt: "2026-11-09T10:00:30.000Z", topic: "CRM shortlist and pricing for 20-person sales team",
+      claim: "Shortlist: Pipedrive, HubSpot Sales Hub, Zoho CRM, Close, Salesforce. Pipedrive is the pick for most 20-rep B2B teams.",
+      query: "best CRM tools for 20-person sales team pricing 2026",
+    }],
+    newsFor: ["pipedrive", "hubspot", "zoho", "close crm", "salesforce"],
+  },
+  {
     text: "You shortlisted CRM tools on Monday. Has HubSpot shipped anything new since then?",
     want: "search", why: "re-check about one tool: news for that tool only",
     notes: [{ ...crmNote[0], query: "CRM tools starting prices small team" }], newsFor: ["hubspot"], maxNews: 2,
